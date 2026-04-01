@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "note2video"
+version = "0.1.0"
+description = "Turn PowerPoint speaker notes into narrated videos."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Note2Video contributors" }
+]
+license = { text = "MIT" }
+dependencies = [
+  "edge-tts",
+  "imageio-ffmpeg",
+  "pillow",
+  "pywin32; platform_system == 'Windows'",
+  "pyttsx3",
+]
+
+[project.scripts]
+note2video = "note2video.cli.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]

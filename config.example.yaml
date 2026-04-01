@@ -1,0 +1,48 @@
+project:
+  name: demo-project
+  input: ./examples/demo.pptx
+  output_dir: ./dist
+  temp_dir: ./.note2video
+  overwrite: false
+
+input:
+  notes_source: auto
+  pages: all
+
+script:
+  mode: spoken
+  normalize_numbers: true
+  remove_brackets: true
+  max_sentence_length: 48
+  pause_ms: 300
+
+tts:
+  provider: edge
+  voice: zh-CN-XiaoxiaoNeural
+  rate: 1.0
+  pitch: 0
+  style: default
+
+subtitle:
+  mode: burn
+  max_chars_per_line: 18
+  style: default
+
+video:
+  ratio: "16:9"
+  resolution: 1080p
+  fps: 30
+  transition: none
+  slide_padding_ms: 200
+
+logging:
+  level: info
+  json_output: false
+
+# 说明：
+# - extract 阶段当前会同时输出 JSON 和 TXT
+# - notes/raw/*.txt      为逐页原始备注
+# - notes/speaker/*.txt  为逐页可读备注
+# - scripts/txt/*.txt    为逐页脚本
+# - notes/all.txt        为整套备注汇总
+# - scripts/all.txt      为整套脚本汇总
