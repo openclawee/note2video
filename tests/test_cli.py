@@ -3,6 +3,7 @@ import wave
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZIP_DEFLATED, ZipFile
 
 from note2video.cli.main import main
 from note2video.parser.extract import (
@@ -302,7 +303,7 @@ def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
 
-    def fake_extract_with_powerpoint(_input_path, _slides_dir):
+    def fake_extract_slide_data(_input_path, _slides_dir):
         return [
             {
                 "page": 1,
@@ -310,11 +311,11 @@ def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:
                 "image": "slides/001.png",
                 "raw_notes": "Hello world",
             }
-        ]
+        ], "mock-extractor"
 
     monkeypatch.setattr(
-        "note2video.parser.extract._extract_with_powerpoint",
-        fake_extract_with_powerpoint,
+        "note2video.parser.extract._extract_slide_data",
+        fake_extract_slide_data,
     )
 
     output_dir = tmp_path / "dist"
@@ -338,22 +339,23 @@ def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:
     assert speaker_txt == "Hello world"
     assert script_txt == "Hello world"
     assert "Hello world" in all_script_txt
+    assert "extractor: mock-extractor" in log_text
 
 
 def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
 
-    def fake_extract_with_powerpoint(_input_path, _slides_dir):
+    def fake_extract_slide_data(_input_path, _slides_dir):
         return [
             {"page": 1, "title": "A", "image": "slides/001.png", "raw_notes": "one"},
             {"page": 2, "title": "B", "image": "slides/002.png", "raw_notes": "two"},
             {"page": 3, "title": "C", "image": "slides/003.png", "raw_notes": "three"},
-        ]
+        ], "mock-extractor"
 
     monkeypatch.setattr(
-        "note2video.parser.extract._extract_with_powerpoint",
-        fake_extract_with_powerpoint,
+        "note2video.parser.extract._extract_slide_data",
+        fake_extract_slide_data,
     )
 
     output_dir = tmp_path / "dist"
@@ -365,6 +367,26 @@ def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     notes = json.loads((output_dir / "notes" / "notes.json").read_text(encoding="utf-8"))
     assert notes["slide_count"] == 2
     assert [slide["page"] for slide in notes["slides"]] == [1, 3]
+
+
+def test_extract_command_openxml_fallback_on_linux(tmp_path) -> None:
+    input_file = tmp_path / "demo.pptx"
+    output_dir = tmp_path / "dist"
+    _write_minimal_openxml_pptx(input_file)
+
+    exit_code = main(["extract", str(input_file), "--out", str(output_dir)])
+
+    assert exit_code == 0
+    notes = json.loads((output_dir / "notes" / "notes.json").read_text(encoding="utf-8"))
+    script = json.loads((output_dir / "scripts" / "script.json").read_text(encoding="utf-8"))
+    log_text = (output_dir / "logs" / "build.log").read_text(encoding="utf-8")
+
+    assert notes["slide_count"] == 1
+    assert notes["slides"][0]["title"] == "Demo Slide"
+    assert notes["slides"][0]["raw_notes"] == "第一句。\n第二句！"
+    assert script["slides"][0]["script"] == "第一句。\n第二句！"
+    assert (output_dir / "slides" / "001.png").exists()
+    assert "extractor: openxml" in log_text
 
 
 def test_notes_body_placeholder_filter() -> None:
@@ -494,3 +516,117 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
     export_path, export_format = exported_paths[0]
     assert Path(export_path).is_absolute()
     assert export_format == "PNG"
+
+
+def _write_minimal_openxml_pptx(output_path: Path) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+</Types>"""
+
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>"""
+
+    presentation = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:sldIdLst>
+  <p:sldId id="256" r:id="rId1"/>
+ </p:sldIdLst>
+ <p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>
+ <p:notesSz cx="6858000" cy="9144000"/>
+</p:presentation>"""
+
+    presentation_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>"""
+
+    slide1 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:cSld>
+  <p:spTree>
+   <p:nvGrpSpPr>
+    <p:cNvPr id="1" name=""/>
+    <p:cNvGrpSpPr/>
+    <p:nvPr/>
+   </p:nvGrpSpPr>
+   <p:grpSpPr>
+    <a:xfrm>
+     <a:off x="0" y="0"/>
+     <a:ext cx="0" cy="0"/>
+     <a:chOff x="0" y="0"/>
+     <a:chExt cx="0" cy="0"/>
+    </a:xfrm>
+   </p:grpSpPr>
+   <p:sp>
+    <p:nvSpPr>
+     <p:cNvPr id="2" name="Title 1"/>
+     <p:cNvSpPr/>
+     <p:nvPr><p:ph type="title"/></p:nvPr>
+    </p:nvSpPr>
+    <p:spPr/>
+    <p:txBody>
+     <a:bodyPr/>
+     <a:lstStyle/>
+     <a:p><a:r><a:t>Demo Slide</a:t></a:r></a:p>
+    </p:txBody>
+   </p:sp>
+  </p:spTree>
+ </p:cSld>
+ <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>"""
+
+    slide1_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>
+</Relationships>"""
+
+    notes_slide1 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:cSld>
+  <p:spTree>
+   <p:nvGrpSpPr>
+    <p:cNvPr id="1" name=""/>
+    <p:cNvGrpSpPr/>
+    <p:nvPr/>
+   </p:nvGrpSpPr>
+   <p:grpSpPr><a:xfrm/></p:grpSpPr>
+   <p:sp>
+    <p:nvSpPr>
+     <p:cNvPr id="2" name="Notes Placeholder 1"/>
+     <p:cNvSpPr/>
+     <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+    </p:nvSpPr>
+    <p:spPr/>
+    <p:txBody>
+     <a:bodyPr/>
+     <a:lstStyle/>
+     <a:p><a:r><a:t>第一句。</a:t></a:r></a:p>
+     <a:p><a:r><a:t>第二句！</a:t></a:r></a:p>
+    </p:txBody>
+   </p:sp>
+  </p:spTree>
+ </p:cSld>
+ <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:notes>"""
+
+    with ZipFile(output_path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("ppt/presentation.xml", presentation)
+        archive.writestr("ppt/_rels/presentation.xml.rels", presentation_rels)
+        archive.writestr("ppt/slides/slide1.xml", slide1)
+        archive.writestr("ppt/slides/_rels/slide1.xml.rels", slide1_rels)
+        archive.writestr("ppt/notesSlides/notesSlide1.xml", notes_slide1)

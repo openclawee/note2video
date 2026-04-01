@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import re
 import sys
+import zipfile
+from xml.etree import ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +17,17 @@ PP_PLACEHOLDER_SLIDE_NUMBER = 13
 PP_PLACEHOLDER_HEADER = 14
 PP_PLACEHOLDER_FOOTER = 15
 PP_PLACEHOLDER_DATE = 16
+
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+XML_NS = {
+    "p": PML_NS,
+    "a": DML_NS,
+    "rel": REL_NS,
+}
 
 
 class PowerPointUnavailableError(RuntimeError):
@@ -27,8 +41,6 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
         raise FileNotFoundError(f"Input file not found: {input_path}")
     if input_path.suffix.lower() != ".pptx":
         raise ValueError("Only .pptx input is supported.")
-    if sys.platform != "win32":
-        raise RuntimeError("Real PPT extraction currently requires Windows PowerPoint.")
 
     out_dir = Path(output_dir)
     slides_dir = out_dir / "slides"
@@ -48,7 +60,7 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     scripts_txt_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    slide_data = _extract_with_powerpoint(input_path, slides_dir)
+    slide_data, extractor = _extract_slide_data(input_path, slides_dir)
     selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
     if selected_pages is not None:
         slide_data = [item for item in slide_data if item["page"] in selected_pages]
@@ -132,11 +144,26 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
         script_all_file=scripts_dir / "all.txt",
     )
     log_file.write_text(
-        _format_extract_log(input_path=input_path, slide_count=len(slides), pages=pages),
+        _format_extract_log(
+            input_path=input_path,
+            slide_count=len(slides),
+            pages=pages,
+            extractor=extractor,
+        ),
         encoding="utf-8",
     )
 
     return manifest
+
+
+def _extract_slide_data(input_path: Path, slides_dir: Path) -> tuple[list[dict[str, Any]], str]:
+    if sys.platform == "win32":
+        try:
+            return _extract_with_powerpoint(input_path, slides_dir), "powerpoint-com"
+        except PowerPointUnavailableError:
+            # Fallback keeps extraction available even when COM automation fails.
+            return _extract_with_openxml(input_path, slides_dir), "openxml-fallback"
+    return _extract_with_openxml(input_path, slides_dir), "openxml"
 
 
 def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
@@ -193,6 +220,143 @@ def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[st
         pythoncom.CoUninitialize()
 
 
+def _extract_with_openxml(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
+    try:
+        with zipfile.ZipFile(input_path, "r") as pptx_file:
+            slide_paths = _list_slide_paths(pptx_file)
+            if not slide_paths:
+                raise ValueError("No slides found in .pptx package.")
+
+            records: list[dict[str, Any]] = []
+            for index, slide_path in enumerate(slide_paths, start=1):
+                slide_root = ET.fromstring(pptx_file.read(slide_path))
+                image_name = f"{index:03d}.png"
+                image_path = slides_dir / image_name
+
+                title = _extract_openxml_slide_title(slide_root)
+                raw_notes = _extract_openxml_slide_notes(pptx_file, slide_path)
+                _write_placeholder_slide_png(image_path, page=index, title=title)
+
+                records.append(
+                    {
+                        "page": index,
+                        "title": title,
+                        "image": f"slides/{image_name}",
+                        "raw_notes": raw_notes,
+                    }
+                )
+            return records
+    except zipfile.BadZipFile as exc:
+        raise PowerPointUnavailableError(f"Invalid .pptx package: {input_path}") from exc
+    except KeyError as exc:
+        raise PowerPointUnavailableError(f"Missing .pptx part: {exc}") from exc
+    except ET.ParseError as exc:
+        raise PowerPointUnavailableError(f"Malformed .pptx XML: {exc}") from exc
+    except OSError as exc:
+        raise PowerPointUnavailableError(f"Unable to read .pptx file: {exc}") from exc
+
+
+def _list_slide_paths(pptx_file: zipfile.ZipFile) -> list[str]:
+    slide_paths = [
+        name
+        for name in pptx_file.namelist()
+        if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+    ]
+    return sorted(slide_paths, key=_slide_sort_key)
+
+
+def _slide_sort_key(path: str) -> tuple[int, str]:
+    match = re.search(r"slide(\d+)\.xml$", path)
+    if match:
+        return int(match.group(1)), path
+    return 999999, path
+
+
+def _extract_openxml_slide_title(slide_root: ET.Element) -> str:
+    title_candidates: list[str] = []
+    fallback_candidates: list[str] = []
+
+    for shape in slide_root.findall(".//p:sp", XML_NS):
+        text = _extract_openxml_shape_text(shape)
+        if not text:
+            continue
+        fallback_candidates.append(text)
+        ph = shape.find("./p:nvSpPr/p:nvPr/p:ph", XML_NS)
+        if ph is not None and ph.get("type") in {"title", "ctrTitle"}:
+            title_candidates.append(text)
+
+    if title_candidates:
+        return title_candidates[0]
+    if fallback_candidates:
+        return fallback_candidates[0]
+    return ""
+
+
+def _extract_openxml_slide_notes(pptx_file: zipfile.ZipFile, slide_path: str) -> str:
+    notes_path = _resolve_notes_slide_path(pptx_file, slide_path)
+    if not notes_path:
+        return ""
+    notes_root = ET.fromstring(pptx_file.read(notes_path))
+
+    lines: list[str] = []
+    for shape in notes_root.findall(".//p:sp", XML_NS):
+        ph = shape.find("./p:nvSpPr/p:nvPr/p:ph", XML_NS)
+        if ph is not None and ph.get("type") in {"dt", "ftr", "hdr", "sldNum"}:
+            continue
+        text = _extract_openxml_shape_text(shape)
+        if text:
+            lines.append(text)
+    return _normalize_text("\n".join(lines))
+
+
+def _resolve_notes_slide_path(pptx_file: zipfile.ZipFile, slide_path: str) -> str | None:
+    rels_path = _to_rels_path(slide_path)
+    if rels_path not in pptx_file.namelist():
+        return None
+
+    rels_root = ET.fromstring(pptx_file.read(rels_path))
+    for relationship in rels_root.findall(".//rel:Relationship", XML_NS):
+        if relationship.get("Type") != f"{DOC_REL_NS}/notesSlide":
+            continue
+        target = relationship.get("Target", "")
+        if not target:
+            continue
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(slide_path), target))
+        return resolved
+    return None
+
+
+def _to_rels_path(part_path: str) -> str:
+    parent = posixpath.dirname(part_path)
+    base = posixpath.basename(part_path)
+    return f"{parent}/_rels/{base}.rels"
+
+
+def _extract_openxml_shape_text(shape: ET.Element) -> str:
+    lines: list[str] = []
+    for paragraph in shape.findall(".//a:p", XML_NS):
+        chunks = [node.text or "" for node in paragraph.findall(".//a:t", XML_NS)]
+        content = "".join(chunks).strip()
+        if content:
+            lines.append(content)
+    return _normalize_text("\n".join(lines))
+
+
+def _write_placeholder_slide_png(image_path: Path, *, page: int, title: str) -> None:
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject
+        raise PowerPointUnavailableError("Pillow is required to generate slide placeholders.") from exc
+
+    image = Image.new("RGB", (1280, 720), color=(250, 250, 250))
+    drawer = ImageDraw.Draw(image)
+    drawer.rectangle((60, 60, 1220, 660), outline=(220, 220, 220), width=3)
+    drawer.text((100, 110), f"Slide {page:03d}", fill=(25, 25, 25))
+    if title:
+        drawer.text((100, 170), title[:120], fill=(50, 50, 50))
+    image.save(image_path, format="PNG")
+
+
 def _parse_page_selection(pages: str | None, *, total_slides: int) -> set[int] | None:
     if not pages or pages == "all":
         return None
@@ -224,12 +388,19 @@ def _parse_page_selection(pages: str | None, *, total_slides: int) -> set[int] |
     return selected
 
 
-def _format_extract_log(*, input_path: Path, slide_count: int, pages: str | None) -> str:
+def _format_extract_log(
+    *,
+    input_path: Path,
+    slide_count: int,
+    pages: str | None,
+    extractor: str,
+) -> str:
     requested_pages = pages or "all"
     return (
         "Note2Video extract run\n"
         f"input_file: {input_path}\n"
         f"requested_pages: {requested_pages}\n"
+        f"extractor: {extractor}\n"
         f"exported_slides: {slide_count}\n"
     )
 
