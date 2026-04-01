@@ -20,7 +20,7 @@ pip-wheel-metadata/
 # Local project outputs
 dist*/
 *.log
-docs/
+docs/chat-history-export.md
 
 # IDE and OS files
 .DS_Store
