@@ -21,6 +21,7 @@ pip-wheel-metadata/
 dist*/
 *.log
 docs/chat-history-export.md
+examples/
 
 # IDE and OS files
 .DS_Store
