@@ -20,6 +20,7 @@ pip-wheel-metadata/
 # Local project outputs
 dist*/
 *.log
+docs/
 
 # IDE and OS files
 .DS_Store
