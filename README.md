@@ -204,7 +204,7 @@ src/note2video/
 
 ### 第三阶段
 
-- 封装为可复用 skill
+- 封装为可复用 skill（OpenClaw / Agent Skills 形态见 `skills/note2video/`，安装说明见其中 `README.md`）
 - 支持批量处理
 - 支持 `pptx` 之外的更多输入源
 
