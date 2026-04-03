@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Windows uses PowerPoint COM when available; never install LibreOffice here.
+      - name: Install Linux slide-export dependencies (LibreOffice + Poppler)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-nogui poppler-utils
+
+      - name: Install Python package and pytest
+        run: |
+          python -m pip install -U pip
+          python -m pip install -e .
+          python -m pip install pytest
+
+      # Synthetic test fixtures are not guaranteed to convert cleanly in LibreOffice.
+      # Real Linux usage: omit this env so soffice + pdftoppm on PATH are used automatically.
+      - name: Run tests
+        env:
+          NOTE2VIDEO_USE_LIBREOFFICE: "0"
+        run: python -m pytest -q

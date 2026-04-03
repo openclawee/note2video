@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import zipfile
 from xml.etree import ElementTree as ET
 from pathlib import Path
@@ -163,6 +167,11 @@ def _extract_slide_data(input_path: Path, slides_dir: Path) -> tuple[list[dict[s
         except PowerPointUnavailableError:
             # Fallback keeps extraction available even when COM automation fails.
             return _extract_with_openxml(input_path, slides_dir), "openxml-fallback"
+    if _should_try_libreoffice_export():
+        try:
+            return _extract_with_libreoffice(input_path, slides_dir), "libreoffice"
+        except PowerPointUnavailableError:
+            pass
     return _extract_with_openxml(input_path, slides_dir), "openxml"
 
 
@@ -222,30 +231,21 @@ def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[st
 
 def _extract_with_openxml(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
     try:
-        with zipfile.ZipFile(input_path, "r") as pptx_file:
-            slide_paths = _list_slide_paths(pptx_file)
-            if not slide_paths:
-                raise ValueError("No slides found in .pptx package.")
-
-            records: list[dict[str, Any]] = []
-            for index, slide_path in enumerate(slide_paths, start=1):
-                slide_root = ET.fromstring(pptx_file.read(slide_path))
-                image_name = f"{index:03d}.png"
-                image_path = slides_dir / image_name
-
-                title = _extract_openxml_slide_title(slide_root)
-                raw_notes = _extract_openxml_slide_notes(pptx_file, slide_path)
-                _write_placeholder_slide_png(image_path, page=index, title=title)
-
-                records.append(
-                    {
-                        "page": index,
-                        "title": title,
-                        "image": f"slides/{image_name}",
-                        "raw_notes": raw_notes,
-                    }
-                )
-            return records
+        records: list[dict[str, Any]] = []
+        for item in _read_openxml_slide_records(input_path):
+            index = item["page"]
+            image_name = f"{index:03d}.png"
+            image_path = slides_dir / image_name
+            _write_placeholder_slide_png(image_path, page=index, title=item["title"])
+            records.append(
+                {
+                    "page": index,
+                    "title": item["title"],
+                    "image": f"slides/{image_name}",
+                    "raw_notes": item["raw_notes"],
+                }
+            )
+        return records
     except zipfile.BadZipFile as exc:
         raise PowerPointUnavailableError(f"Invalid .pptx package: {input_path}") from exc
     except KeyError as exc:
@@ -254,6 +254,8 @@ def _extract_with_openxml(input_path: Path, slides_dir: Path) -> list[dict[str, 
         raise PowerPointUnavailableError(f"Malformed .pptx XML: {exc}") from exc
     except OSError as exc:
         raise PowerPointUnavailableError(f"Unable to read .pptx file: {exc}") from exc
+    except ValueError as exc:
+        raise PowerPointUnavailableError(str(exc)) from exc
 
 
 def _list_slide_paths(pptx_file: zipfile.ZipFile) -> list[str]:
@@ -307,6 +309,204 @@ def _extract_openxml_slide_notes(pptx_file: zipfile.ZipFile, slide_path: str) ->
         if text:
             lines.append(text)
     return _normalize_text("\n".join(lines))
+
+
+def _read_openxml_slide_records(input_path: Path) -> list[dict[str, Any]]:
+    """Parse slide titles and speaker notes from the .pptx package (no raster export)."""
+    with zipfile.ZipFile(input_path, "r") as pptx_file:
+        slide_paths = _list_slide_paths(pptx_file)
+        if not slide_paths:
+            raise ValueError("No slides found in .pptx package.")
+
+        records: list[dict[str, Any]] = []
+        for index, slide_path in enumerate(slide_paths, start=1):
+            slide_root = ET.fromstring(pptx_file.read(slide_path))
+            title = _extract_openxml_slide_title(slide_root)
+            raw_notes = _extract_openxml_slide_notes(pptx_file, slide_path)
+            records.append({"page": index, "title": title, "raw_notes": raw_notes})
+        return records
+
+
+def _libreoffice_export_disabled() -> bool:
+    flag = os.environ.get("NOTE2VIDEO_USE_LIBREOFFICE", "").strip().lower()
+    return flag in {"0", "false", "no", "off"}
+
+
+def _find_soffice() -> str | None:
+    env_path = os.environ.get("NOTE2VIDEO_LIBREOFFICE", "").strip()
+    if env_path:
+        candidate = Path(env_path)
+        if candidate.is_file():
+            return str(candidate.resolve())
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
+
+
+def _find_pdftoppm() -> str | None:
+    return shutil.which("pdftoppm")
+
+
+def _should_try_libreoffice_export() -> bool:
+    if sys.platform == "win32":
+        return False
+    if _libreoffice_export_disabled():
+        return False
+    return _find_soffice() is not None and _find_pdftoppm() is not None
+
+
+def _run_tool(args: list[str], *, timeout: int, label: str) -> None:
+    try:
+        result = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise PowerPointUnavailableError(f"{label} timed out after {timeout}s.") from exc
+    except OSError as exc:
+        raise PowerPointUnavailableError(f"{label} could not be executed: {exc}") from exc
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        detail = stderr or stdout or "no output"
+        raise PowerPointUnavailableError(
+            f"{label} failed (exit {result.returncode}): {detail[:1200]}"
+        )
+
+
+def _libreoffice_convert_to_pdf(input_path: Path, work_dir: Path, soffice: str) -> Path:
+    """Run LibreOffice headless to produce a PDF next to the .pptx stem."""
+    _run_tool(
+        [
+            soffice,
+            "--headless",
+            "--nologo",
+            "--nodefault",
+            "--nofirststartwizard",
+            "--nolockcheck",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            str(work_dir),
+            str(input_path.resolve()),
+        ],
+        timeout=int(os.environ.get("NOTE2VIDEO_LIBREOFFICE_TIMEOUT", "300")),
+        label="LibreOffice (pptx to pdf)",
+    )
+
+    expected = work_dir / f"{input_path.stem}.pdf"
+    if expected.exists():
+        return expected
+
+    pdfs = sorted(work_dir.glob("*.pdf"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not pdfs:
+        raise PowerPointUnavailableError(
+            "LibreOffice finished but no PDF was produced. "
+            "Check that LibreOffice Impress can open this .pptx."
+        )
+    return pdfs[0]
+
+
+def _pdftoppm_split_pngs(pdf_path: Path, work_dir: Path, pdftoppm: str) -> list[Path]:
+    prefix = work_dir / "slide"
+    dpi = os.environ.get("NOTE2VIDEO_PDF_RENDER_DPI", "150").strip() or "150"
+    _run_tool(
+        [pdftoppm, "-png", "-r", dpi, str(pdf_path), str(prefix)],
+        timeout=int(os.environ.get("NOTE2VIDEO_PDFTOPPM_TIMEOUT", "180")),
+        label="pdftoppm (pdf to png)",
+    )
+
+    pattern = f"{prefix.name}-*.png"
+    pages = sorted(
+        work_dir.glob(pattern),
+        key=lambda p: _pdftoppm_page_index(p.name),
+    )
+    if pages:
+        return pages
+
+    fallback = sorted(work_dir.glob("*.png"), key=lambda p: _pdftoppm_page_index(p.name))
+    if not fallback:
+        raise PowerPointUnavailableError(
+            "pdftoppm produced no PNG pages. Check Poppler (pdftoppm) installation."
+        )
+    return fallback
+
+
+def _pdftoppm_page_index(filename: str) -> int:
+    match = re.search(r"-(\d+)\.png$", filename, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def _apply_png_sequence_to_slides(
+    meta: list[dict[str, Any]],
+    png_paths: list[Path],
+    slides_dir: Path,
+) -> list[dict[str, Any]]:
+    """Copy raster pages in order; pad missing slides with placeholders."""
+    records: list[dict[str, Any]] = []
+    for index, row in enumerate(meta):
+        page = int(row["page"])
+        title = row["title"]
+        raw_notes = row["raw_notes"]
+        image_name = f"{page:03d}.png"
+        dest = slides_dir / image_name
+        if index < len(png_paths):
+            shutil.copy2(png_paths[index], dest)
+        else:
+            _write_placeholder_slide_png(dest, page=page, title=title)
+        records.append(
+            {
+                "page": page,
+                "title": title,
+                "image": f"slides/{image_name}",
+                "raw_notes": raw_notes,
+            }
+        )
+    return records
+
+
+def _extract_with_libreoffice(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
+    soffice = _find_soffice()
+    pdftoppm = _find_pdftoppm()
+    if not soffice or not pdftoppm:
+        raise PowerPointUnavailableError("LibreOffice export requires soffice and pdftoppm on PATH.")
+
+    try:
+        meta = _read_openxml_slide_records(input_path)
+    except zipfile.BadZipFile as exc:
+        raise PowerPointUnavailableError(f"Invalid .pptx package: {input_path}") from exc
+    except KeyError as exc:
+        raise PowerPointUnavailableError(f"Missing .pptx part: {exc}") from exc
+    except ET.ParseError as exc:
+        raise PowerPointUnavailableError(f"Malformed .pptx XML: {exc}") from exc
+    except OSError as exc:
+        raise PowerPointUnavailableError(f"Unable to read .pptx file: {exc}") from exc
+    except ValueError as exc:
+        raise PowerPointUnavailableError(str(exc)) from exc
+
+    work_dir = Path(tempfile.mkdtemp(prefix="note2video-lo-"))
+    try:
+        pdf_path = _libreoffice_convert_to_pdf(input_path, work_dir, soffice)
+        png_paths = _pdftoppm_split_pngs(pdf_path, work_dir, pdftoppm)
+
+        if len(png_paths) < len(meta):
+            raise PowerPointUnavailableError(
+                f"PDF has fewer pages ({len(png_paths)}) than slides in the deck ({len(meta)}). "
+                "Try opening and re-saving the file in PowerPoint or LibreOffice."
+            )
+        if len(png_paths) > len(meta):
+            png_paths = png_paths[: len(meta)]
+
+        return _apply_png_sequence_to_slides(meta, png_paths, slides_dir)
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def _resolve_notes_slide_path(pptx_file: zipfile.ZipFile, slide_path: str) -> str | None:

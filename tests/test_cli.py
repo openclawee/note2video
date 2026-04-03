@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 from note2video.cli.main import main
 from note2video.parser.extract import (
+    _apply_png_sequence_to_slides,
     _is_notes_body_placeholder,
     _to_script,
     _to_speaker_notes,
@@ -369,10 +370,11 @@ def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     assert [slide["page"] for slide in notes["slides"]] == [1, 3]
 
 
-def test_extract_command_openxml_fallback_on_linux(tmp_path) -> None:
+def test_extract_command_openxml_fallback_on_linux(tmp_path, monkeypatch) -> None:
     input_file = tmp_path / "demo.pptx"
     output_dir = tmp_path / "dist"
     _write_minimal_openxml_pptx(input_file)
+    monkeypatch.setenv("NOTE2VIDEO_USE_LIBREOFFICE", "0")
 
     exit_code = main(["extract", str(input_file), "--out", str(output_dir)])
 
@@ -387,6 +389,26 @@ def test_extract_command_openxml_fallback_on_linux(tmp_path) -> None:
     assert script["slides"][0]["script"] == "第一句。\n第二句！"
     assert (output_dir / "slides" / "001.png").exists()
     assert "extractor: openxml" in log_text
+
+
+def test_apply_png_sequence_to_slides_copies_and_pads(tmp_path) -> None:
+    slides_dir = tmp_path / "slides"
+    slides_dir.mkdir()
+    png_a = tmp_path / "a.png"
+    png_b = tmp_path / "b.png"
+    png_a.write_bytes(b"img1")
+    png_b.write_bytes(b"img2")
+    meta = [
+        {"page": 1, "title": "T1", "raw_notes": "n1"},
+        {"page": 2, "title": "T2", "raw_notes": "n2"},
+        {"page": 3, "title": "T3", "raw_notes": "n3"},
+    ]
+    out = _apply_png_sequence_to_slides(meta, [png_a, png_b], slides_dir)
+    assert len(out) == 3
+    assert (slides_dir / "001.png").read_bytes() == b"img1"
+    assert (slides_dir / "002.png").read_bytes() == b"img2"
+    assert (slides_dir / "003.png").exists()
+    assert out[2]["raw_notes"] == "n3"
 
 
 def test_notes_body_placeholder_filter() -> None:

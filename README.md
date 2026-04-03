@@ -77,6 +77,38 @@ note2video build input.pptx --out ./dist
 
 详细命令说明见 `docs/cli.md`。
 
+## 平台与幻灯片导出
+
+- **Windows**：优先使用 Microsoft PowerPoint COM 导出真实页面图片；失败时回退为 OpenXML + 占位图。
+- **Linux / macOS**：若 `PATH` 上同时能找到 `soffice`（或 `libreoffice`）以及 `pdftoppm`（Poppler），则通过「LibreOffice 无界面转 PDF → `pdftoppm` 切 PNG」导出真实页面图片；否则回退为 OpenXML + 占位图。
+
+Debian / Ubuntu 示例：
+
+```bash
+sudo apt install libreoffice-nogui poppler-utils
+```
+
+可选环境变量：
+
+- `NOTE2VIDEO_USE_LIBREOFFICE`：设为 `0`、`false` 或 `off` 可禁用 LibreOffice 路径（例如测试或强制占位图）。
+- `NOTE2VIDEO_LIBREOFFICE`：`soffice` 可执行文件的绝对路径。
+- `NOTE2VIDEO_PDF_RENDER_DPI`：`pdftoppm` 分辨率，默认 `150`。
+
+**Windows**：无需安装 LibreOffice；程序会优先走 PowerPoint COM（与 Linux 路径无关）。
+
+### Docker（仅 Linux 镜像）
+
+容器内预装 `libreoffice-nogui` 与 `poppler-utils`，用于在无桌面环境下导出真实幻灯片图。Windows 上请直接本机安装 Python 运行，不要用此镜像替代 PowerPoint 路径。
+
+```bash
+docker build -t note2video .
+docker run --rm -v "%CD%:/work" -w /work note2video extract ./deck.pptx --out ./dist
+```
+
+（PowerShell 下将卷挂载改为 `-v "${PWD}:/work"`。）
+
+CI（`.github/workflows/ci.yml`）在 **Ubuntu** 上安装上述系统依赖以便与 Docker 一致；在 **Windows** 上**不会**安装 LibreOffice，与本地行为一致。测试任务统一设置 `NOTE2VIDEO_USE_LIBREOFFICE=0`，避免对极简测试用 `.pptx` 做转换导致不稳定；真实 Linux 环境不设该变量即可自动走 LibreOffice。
+
 ## 输出目录示例
 
 ```text
@@ -191,7 +223,8 @@ src/note2video/
 当前仓库已完成：
 
 - CLI 基础骨架
-- PowerPoint 导图与备注提取
+- Windows PowerPoint COM 导图；Linux / macOS 可选 LibreOffice + Poppler 真实导图
+- 备注提取（OpenXML）
 - 备注页误提取过滤
 - 按页与汇总文本导出
 - `voice` 第一版骨架与本地 TTS 接口
