@@ -453,7 +453,7 @@ def _run_pipeline_with_log(config: JobConfig, emit_log) -> int:
         return 1
 
 
-def _build_ui(QtWidgets):
+def _build_ui(QtWidgets, QtCore):
     class MainWindow(QtWidgets.QMainWindow):
         def __init__(self) -> None:
             super().__init__()
@@ -904,7 +904,7 @@ def _build_ui(QtWidgets):
             self.publish_schedule_chk = QtWidgets.QCheckBox("定时发布")
             self.publish_schedule_time = QtWidgets.QDateTimeEdit()
             self.publish_schedule_time.setCalendarPopup(True)
-            self.publish_schedule_time.setDateTime(self._QtCore.QDateTime.currentDateTime())
+            self.publish_schedule_time.setDateTime(QtCore.QDateTime.currentDateTime())
             self.publish_schedule_time.setEnabled(False)
             schedule_row = QtWidgets.QHBoxLayout()
             schedule_row.addWidget(self.publish_schedule_chk)
@@ -2160,7 +2160,7 @@ class MainWindow:  # thin wrapper used by main()
     def __init__(self, *, QtCore, QtWidgets) -> None:
         self._QtCore = QtCore
         self._QtWidgets = QtWidgets
-        WindowCls = _build_ui(QtWidgets)
+        WindowCls = _build_ui(QtWidgets, QtCore)
         window = WindowCls()
         window._QtCore = QtCore
         window._QtWidgets = QtWidgets
