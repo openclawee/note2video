@@ -131,6 +131,7 @@ def generate_voice_assets(
     )
     generated: list[dict[str, Any]] = []
     timing_segments: list[dict[str, Any]] = []
+    word_timing_segments: list[dict[str, Any]] = []
     global_cursor_ms = 0
 
     for item in scripts:
@@ -147,8 +148,14 @@ def generate_voice_assets(
 
             for idx, sentence in enumerate(sentences, start=1):
                 sentence_file = audio_dir / f"{page:03d}.{idx:02d}.wav"
-                provider.synthesize_to_file(text=sentence, output_file=sentence_file)
-                sentence_duration_ms = _read_wav_duration_ms(sentence_file)
+                if isinstance(provider, EdgeTTSProvider):
+                    boundaries, sentence_duration_ms = provider.synthesize_to_file_with_word_boundaries(
+                        text=sentence, output_file=sentence_file
+                    )
+                else:
+                    provider.synthesize_to_file(text=sentence, output_file=sentence_file)
+                    boundaries = []
+                    sentence_duration_ms = _read_wav_duration_ms(sentence_file)
                 sentence_files.append(sentence_file)
                 timing_segments.append(
                     {
@@ -161,6 +168,18 @@ def generate_voice_assets(
                         "duration_ms": sentence_duration_ms,
                     }
                 )
+                if boundaries:
+                    word_timing_segments.append(
+                        {
+                            "page": page,
+                            "index": len(word_timing_segments) + 1,
+                            "sentence_index": idx,
+                            "text": sentence,
+                            "start_ms": sentence_cursor_ms,
+                            "end_ms": sentence_cursor_ms + sentence_duration_ms,
+                            "words": boundaries,
+                        }
+                    )
                 sentence_cursor_ms += sentence_duration_ms
 
             _merge_wav_files(input_files=sentence_files, output_file=output_file)
@@ -199,6 +218,14 @@ def generate_voice_assets(
         json.dumps({"segments": timing_segments}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
+    word_timings_rel: str | None = None
+    if word_timing_segments:
+        word_timings_path = audio_dir / "word_timings.json"
+        word_timings_path.write_text(
+            json.dumps({"segments": word_timing_segments}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        word_timings_rel = "audio/word_timings.json"
 
     _update_manifest(
         manifest_path=manifest_path,
@@ -206,6 +233,7 @@ def generate_voice_assets(
         provider_name=provider_name,
         voice_id=voice_id,
         timings_path="audio/timings.json",
+        word_timings_path=word_timings_rel,
         tts_rate=rate_mult,
     )
 
@@ -370,6 +398,76 @@ class EdgeTTSProvider:
         # Should never reach here.
         if last_exc is not None:
             raise VoiceGenerationError(f"edge-tts synthesis failed: {last_exc}") from last_exc
+
+    def synthesize_to_file_with_word_boundaries(
+        self, *, text: str, output_file: Path
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Synthesize speech and return word boundary timings (ms).
+
+        Returns:
+        - boundaries: list of {text, offset_ms, duration_ms}
+        - total_audio_ms: duration of final WAV (ms)
+        """
+        try:
+            import edge_tts
+        except ImportError as exc:  # pragma: no cover
+            raise VoiceGenerationError("edge-tts is required for Edge voice generation.") from exc
+
+        temp_audio = output_file.with_suffix(".edge.mp3")
+        pct = int(round((self.tts_rate - 1.0) * 100))
+        pct = max(-50, min(100, pct))
+        rate_str = f"{pct:+d}%"
+
+        async def _run_collect(rate: str) -> list[dict[str, Any]]:
+            communicate = edge_tts.Communicate(text=text, voice=self.voice_id, rate=rate)
+            boundaries: list[dict[str, Any]] = []
+            with open(temp_audio, "wb") as f:
+                async for chunk in communicate.stream():
+                    t = chunk.get("type")
+                    if t == "audio":
+                        f.write(chunk["data"])
+                    elif t == "WordBoundary":
+                        # edge-tts reports 100ns ticks; convert to ms
+                        offset_ms = int(round(int(chunk.get("offset", 0)) / 10_000))
+                        dur_ms = int(round(int(chunk.get("duration", 0)) / 10_000))
+                        boundaries.append(
+                            {
+                                "text": str(chunk.get("text", "")),
+                                "offset_ms": offset_ms,
+                                "duration_ms": dur_ms,
+                            }
+                        )
+            return boundaries
+
+        last_exc: Exception | None = None
+        for attempt, rate in enumerate([rate_str, "+0%"], start=1):
+            try:
+                boundaries = asyncio.run(_run_collect(rate))
+                _convert_audio_to_wav(temp_audio=temp_audio, output_file=output_file)
+                total_ms = _read_wav_duration_ms(output_file)
+                return boundaries, total_ms
+            except Exception as exc:  # pragma: no cover
+                last_exc = exc
+                try:
+                    if temp_audio.exists():
+                        temp_audio.unlink()
+                except OSError:
+                    pass
+                if attempt >= 2:
+                    msg = (
+                        f"edge-tts synthesis failed: {exc}\n"
+                        f"- voice: {self.voice_id}\n"
+                        f"- rate: {rate_str}\n"
+                        "Hints:\n"
+                        "- Check network connectivity (edge-tts requires outbound access).\n"
+                        "- If you're behind a proxy/VPN/firewall, try from a different network.\n"
+                        "- Try a different voice ID (run: note2video voices --tts-provider edge).\n"
+                    )
+                    raise VoiceGenerationError(msg) from exc
+        if last_exc is not None:
+            raise VoiceGenerationError(f"edge-tts synthesis failed: {last_exc}") from last_exc
+        return [], 0
 
 
 class MiniMaxTTSProvider:
@@ -659,6 +757,7 @@ def _update_manifest(
     provider_name: str,
     voice_id: str,
     timings_path: str,
+    word_timings_path: str | None,
     tts_rate: float,
 ) -> None:
     if not manifest_path.exists():
@@ -674,6 +773,8 @@ def _update_manifest(
     outputs["audio_dir"] = "audio"
     outputs["merged_audio"] = "audio/merged.wav"
     outputs["timings"] = timings_path
+    if word_timings_path:
+        outputs["word_timings"] = word_timings_path
 
     for slide in manifest.get("slides", []):
         page = slide.get("page")

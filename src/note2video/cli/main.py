@@ -52,6 +52,64 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Subtitle color when burning into video (hex #RRGGBB). Example: #FFFFFF",
     )
+    build_cmd.add_argument(
+        "--subtitle-font",
+        default="",
+        help="Subtitle font family name when burning into video (e.g. Microsoft YaHei).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-size",
+        type=int,
+        default=0,
+        help="Subtitle font size in pixels when burning into video (0 = default).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-highlight-mode",
+        default="none",
+        choices=["none", "line", "word"],
+        help="Subtitle highlight mode: none|line|word (word requires edge-tts word timings).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-highlight-color",
+        default="",
+        help="Highlight color used by highlight mode (hex #RRGGBB). Example: #FFD400",
+    )
+    build_cmd.add_argument(
+        "--subtitle-fade-in-ms",
+        type=int,
+        default=80,
+        help="ASS fade-in duration per sentence (ms).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-fade-out-ms",
+        type=int,
+        default=120,
+        help="ASS fade-out duration per sentence (ms).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-scale-from",
+        type=int,
+        default=100,
+        help="ASS scale at sentence start (percent).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-scale-to",
+        type=int,
+        default=104,
+        help="ASS scale after short ease-in (percent).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-outline",
+        type=int,
+        default=1,
+        help="ASS outline thickness (0+).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-shadow",
+        type=int,
+        default=0,
+        help="ASS shadow depth (0+).",
+    )
     # MiniMax CN/Global are separate providers; host selection is implied by --tts-provider.
     build_cmd.set_defaults(handler=handle_build)
 
@@ -109,6 +167,64 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Subtitle color when burning into video (hex #RRGGBB). Example: #FFFFFF",
     )
+    render_cmd.add_argument(
+        "--subtitle-font",
+        default="",
+        help="Subtitle font family name when burning into video (e.g. Microsoft YaHei).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-size",
+        type=int,
+        default=0,
+        help="Subtitle font size in pixels when burning into video (0 = default).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-highlight-mode",
+        default="none",
+        choices=["none", "line", "word"],
+        help="Subtitle highlight mode: none|line|word (word requires edge-tts word timings).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-highlight-color",
+        default="",
+        help="Highlight color used by highlight mode (hex #RRGGBB). Example: #FFD400",
+    )
+    render_cmd.add_argument(
+        "--subtitle-fade-in-ms",
+        type=int,
+        default=80,
+        help="ASS fade-in duration per sentence (ms).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-fade-out-ms",
+        type=int,
+        default=120,
+        help="ASS fade-out duration per sentence (ms).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-scale-from",
+        type=int,
+        default=100,
+        help="ASS scale at sentence start (percent).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-scale-to",
+        type=int,
+        default=104,
+        help="ASS scale after short ease-in (percent).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-outline",
+        type=int,
+        default=1,
+        help="ASS outline thickness (0+).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-shadow",
+        type=int,
+        default=0,
+        help="ASS shadow depth (0+).",
+    )
     render_cmd.set_defaults(handler=handle_render)
 
     return parser
@@ -146,6 +262,16 @@ def handle_build(args: argparse.Namespace) -> int:
         bgm_fade_out_s=float(args.bgm_fade_out),
         narration_volume=float(args.narration_volume),
         subtitle_color=(args.subtitle_color.strip() or None),
+        subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
+        subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
+        subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
+        subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
+        subtitle_scale_from=int(args.subtitle_scale_from),
+        subtitle_scale_to=int(args.subtitle_scale_to),
+        subtitle_outline=int(args.subtitle_outline),
+        subtitle_shadow=int(args.subtitle_shadow),
+        subtitle_font=(args.subtitle_font.strip() or None),
+        subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
     )
 
     payload = {
@@ -260,6 +386,16 @@ def handle_render(args: argparse.Namespace) -> int:
         bgm_fade_out_s=float(args.bgm_fade_out),
         narration_volume=float(args.narration_volume),
         subtitle_color=(args.subtitle_color.strip() or None),
+        subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
+        subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
+        subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
+        subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
+        subtitle_scale_from=int(args.subtitle_scale_from),
+        subtitle_scale_to=int(args.subtitle_scale_to),
+        subtitle_outline=int(args.subtitle_outline),
+        subtitle_shadow=int(args.subtitle_shadow),
+        subtitle_font=(args.subtitle_font.strip() or None),
+        subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
     )
     payload = {
         "command": "render",

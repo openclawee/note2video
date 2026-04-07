@@ -291,6 +291,16 @@ class JobConfig:
     tts_rate: float
     minimax_base_url: str | None = None
     subtitle_color: str | None = None
+    subtitle_highlight_mode: str | None = None
+    subtitle_highlight_color: str | None = None
+    subtitle_fade_in_ms: int | None = None
+    subtitle_fade_out_ms: int | None = None
+    subtitle_scale_from: int | None = None
+    subtitle_scale_to: int | None = None
+    subtitle_outline: int | None = None
+    subtitle_shadow: int | None = None
+    subtitle_font: str | None = None
+    subtitle_size: int | None = None
     bgm_path: str | None = None
     bgm_volume: float = 0.18
     narration_volume: float = 1.0
@@ -352,7 +362,11 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
     emit_log(f"tts_rate: {config.tts_rate}")
 
     emit_log("阶段：extract")
-    extract_project(str(config.pptx_path), str(config.out_dir), pages=config.pages)
+    manifest = extract_project(str(config.pptx_path), str(config.out_dir), pages=config.pages)
+    try:
+        emit_log(f"细节：slides={getattr(manifest, 'slide_count', '?')}")
+    except Exception:
+        pass
 
     if config.mode == "extract":
         emit_log("完成：extract")
@@ -360,7 +374,7 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
 
     emit_log("阶段：voice")
     script_path = config.out_dir / "scripts" / "script.json"
-    generate_voice_assets(
+    voice_result = generate_voice_assets(
         str(script_path),
         str(config.out_dir),
         provider_name=(config.tts_provider or "pyttsx3"),
@@ -368,20 +382,47 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
         tts_rate=config.tts_rate,
         minimax_base_url=config.minimax_base_url,
     )
+    try:
+        emit_log(
+            "细节："
+            + f"provider={voice_result.get('provider')}, "
+            + f"voice={voice_result.get('voice')}, "
+            + f"tts_rate={voice_result.get('tts_rate')}"
+        )
+    except Exception:
+        pass
 
     emit_log("阶段：subtitle")
-    generate_subtitles(str(script_path), str(config.out_dir))
+    sub_result = generate_subtitles(str(script_path), str(config.out_dir))
+    try:
+        emit_log(f"细节：segments={sub_result.get('segment_count')}, slides={sub_result.get('slide_count')}")
+    except Exception:
+        pass
 
     emit_log("阶段：render")
     result = render_video(
         str(config.out_dir),
         subtitle_color=config.subtitle_color,
+        subtitle_highlight_mode=config.subtitle_highlight_mode,
+        subtitle_highlight_color=config.subtitle_highlight_color,
+        subtitle_fade_in_ms=config.subtitle_fade_in_ms,
+        subtitle_fade_out_ms=config.subtitle_fade_out_ms,
+        subtitle_scale_from=config.subtitle_scale_from,
+        subtitle_scale_to=config.subtitle_scale_to,
+        subtitle_outline=config.subtitle_outline,
+        subtitle_shadow=config.subtitle_shadow,
+        subtitle_font=config.subtitle_font,
+        subtitle_size=config.subtitle_size,
         bgm_path=config.bgm_path,
         bgm_volume=float(config.bgm_volume),
         narration_volume=float(config.narration_volume),
         bgm_fade_in_s=float(config.bgm_fade_in_s),
         bgm_fade_out_s=float(config.bgm_fade_out_s),
     )
+    try:
+        emit_log(f"细节：subtitles_burned={result.get('subtitles_burned')}, mixed_audio={bool(result.get('mixed_audio'))}")
+    except Exception:
+        pass
     emit_log(f"输出视频：{result.get('video')}")
 
     emit_log("完成：build")
@@ -437,6 +478,7 @@ def _build_ui(QtWidgets):
             self._preview_web_view: Any = None
             self._preview_web_available: bool = False
             self._pipeline_busy = False
+            self._pipeline_stage_label: str = ""
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
@@ -526,12 +568,64 @@ def _build_ui(QtWidgets):
             tts_grid.addWidget(QtWidgets.QLabel("语速"), 2, 0)
             tts_grid.addWidget(self.tts_rate_spin, 2, 1)
 
-            # --- Render ---
-            render_group = QtWidgets.QGroupBox("渲染（字幕 / 混音）")
-            render_grid = QtWidgets.QGridLayout(render_group)
+            # --- Mix ---
+            mix_group = QtWidgets.QGroupBox("混音（BGM）")
+            mix_grid = QtWidgets.QGridLayout(mix_group)
+            mix_grid.setColumnStretch(1, 1)
+            mix_grid.setColumnStretch(3, 1)
+            left.addWidget(mix_group)
+
+            # BGM mixer controls
+            self.bgm_path_edit = QtWidgets.QLineEdit()
+            self.bgm_path_btn = QtWidgets.QPushButton("选择…")
+            bgm_row = QtWidgets.QHBoxLayout()
+            bgm_row.addWidget(self.bgm_path_edit, 1)
+            bgm_row.addWidget(self.bgm_path_btn)
+            mix_grid.addWidget(QtWidgets.QLabel("BGM"), 0, 0)
+            mix_grid.addLayout(bgm_row, 0, 1, 1, 3)
+
+            self.bgm_volume_spin = QtWidgets.QDoubleSpinBox()
+            self.bgm_volume_spin.setRange(0.0, 2.0)
+            self.bgm_volume_spin.setSingleStep(0.05)
+            self.bgm_volume_spin.setDecimals(2)
+            self.bgm_volume_spin.setValue(0.18)
+            self.bgm_volume_spin.setToolTip("背景音乐音量，默认 0.18。")
+            mix_grid.addWidget(QtWidgets.QLabel("BGM 音量"), 1, 0)
+            mix_grid.addWidget(self.bgm_volume_spin, 1, 1)
+
+            self.narration_volume_spin = QtWidgets.QDoubleSpinBox()
+            self.narration_volume_spin.setRange(0.0, 3.0)
+            self.narration_volume_spin.setSingleStep(0.05)
+            self.narration_volume_spin.setDecimals(2)
+            self.narration_volume_spin.setValue(1.0)
+            self.narration_volume_spin.setToolTip("旁白音量，默认 1.0。")
+            mix_grid.addWidget(QtWidgets.QLabel("旁白音量"), 1, 2)
+            mix_grid.addWidget(self.narration_volume_spin, 1, 3)
+
+            self.bgm_fade_in_spin = QtWidgets.QDoubleSpinBox()
+            self.bgm_fade_in_spin.setRange(0.0, 30.0)
+            self.bgm_fade_in_spin.setSingleStep(0.5)
+            self.bgm_fade_in_spin.setDecimals(1)
+            self.bgm_fade_in_spin.setValue(0.0)
+            self.bgm_fade_in_spin.setToolTip("背景音乐淡入时长（秒）。")
+            mix_grid.addWidget(QtWidgets.QLabel("淡入(s)"), 2, 0)
+            mix_grid.addWidget(self.bgm_fade_in_spin, 2, 1)
+
+            self.bgm_fade_out_spin = QtWidgets.QDoubleSpinBox()
+            self.bgm_fade_out_spin.setRange(0.0, 30.0)
+            self.bgm_fade_out_spin.setSingleStep(0.5)
+            self.bgm_fade_out_spin.setDecimals(1)
+            self.bgm_fade_out_spin.setValue(0.0)
+            self.bgm_fade_out_spin.setToolTip("背景音乐淡出时长（秒）。")
+            mix_grid.addWidget(QtWidgets.QLabel("淡出(s)"), 2, 2)
+            mix_grid.addWidget(self.bgm_fade_out_spin, 2, 3)
+
+            # --- Subtitles ---
+            subtitle_group = QtWidgets.QGroupBox("字幕（样式 / 特效）")
+            render_grid = QtWidgets.QGridLayout(subtitle_group)
             render_grid.setColumnStretch(1, 1)
             render_grid.setColumnStretch(3, 1)
-            left.addWidget(render_group)
+            left.addWidget(subtitle_group)
 
             # Subtitle color picker
             self.subtitle_color_value = QtWidgets.QLineEdit()
@@ -550,50 +644,99 @@ def _build_ui(QtWidgets):
             render_grid.addWidget(QtWidgets.QLabel("字幕颜色"), 0, 0)
             render_grid.addLayout(sub_row, 0, 1, 1, 3)
 
-            # BGM mixer controls
-            self.bgm_path_edit = QtWidgets.QLineEdit()
-            self.bgm_path_btn = QtWidgets.QPushButton("选择…")
-            bgm_row = QtWidgets.QHBoxLayout()
-            bgm_row.addWidget(self.bgm_path_edit, 1)
-            bgm_row.addWidget(self.bgm_path_btn)
-            render_grid.addWidget(QtWidgets.QLabel("BGM"), 1, 0)
-            render_grid.addLayout(bgm_row, 1, 1, 1, 3)
+            # Subtitle font / size
+            self.subtitle_font_edit = QtWidgets.QComboBox()
+            self.subtitle_font_edit.setEditable(True)
+            self.subtitle_font_edit.setToolTip("烧录字幕时使用的字体名（FontName）。示例：Microsoft YaHei")
+            try:
+                from PySide6.QtGui import QFontDatabase
 
-            self.bgm_volume_spin = QtWidgets.QDoubleSpinBox()
-            self.bgm_volume_spin.setRange(0.0, 2.0)
-            self.bgm_volume_spin.setSingleStep(0.05)
-            self.bgm_volume_spin.setDecimals(2)
-            self.bgm_volume_spin.setValue(0.18)
-            self.bgm_volume_spin.setToolTip("背景音乐音量，默认 0.18。")
-            render_grid.addWidget(QtWidgets.QLabel("BGM 音量"), 2, 0)
-            render_grid.addWidget(self.bgm_volume_spin, 2, 1)
+                fonts = list(QFontDatabase.families())
+            except Exception:
+                fonts = []
+            if fonts:
+                self.subtitle_font_edit.addItem("（默认）", "")
+                for f in fonts:
+                    self.subtitle_font_edit.addItem(str(f), str(f))
+                # Prefer a common CJK font on Windows if available.
+                idx = self.subtitle_font_edit.findText("Microsoft YaHei")
+                if idx >= 0:
+                    self.subtitle_font_edit.setCurrentIndex(idx)
+            render_grid.addWidget(QtWidgets.QLabel("字幕字体"), 1, 0)
+            render_grid.addWidget(self.subtitle_font_edit, 1, 1, 1, 3)
 
-            self.narration_volume_spin = QtWidgets.QDoubleSpinBox()
-            self.narration_volume_spin.setRange(0.0, 3.0)
-            self.narration_volume_spin.setSingleStep(0.05)
-            self.narration_volume_spin.setDecimals(2)
-            self.narration_volume_spin.setValue(1.0)
-            self.narration_volume_spin.setToolTip("旁白音量，默认 1.0。")
-            render_grid.addWidget(QtWidgets.QLabel("旁白音量"), 2, 2)
-            render_grid.addWidget(self.narration_volume_spin, 2, 3)
+            self.subtitle_size_spin = QtWidgets.QSpinBox()
+            self.subtitle_size_spin.setRange(8, 200)
+            self.subtitle_size_spin.setValue(48)
+            self.subtitle_size_spin.setToolTip("烧录字幕时字体大小（FontSize）。默认 48。")
+            render_grid.addWidget(QtWidgets.QLabel("字体大小"), 2, 0)
+            render_grid.addWidget(self.subtitle_size_spin, 2, 1)
 
-            self.bgm_fade_in_spin = QtWidgets.QDoubleSpinBox()
-            self.bgm_fade_in_spin.setRange(0.0, 30.0)
-            self.bgm_fade_in_spin.setSingleStep(0.5)
-            self.bgm_fade_in_spin.setDecimals(1)
-            self.bgm_fade_in_spin.setValue(0.0)
-            self.bgm_fade_in_spin.setToolTip("背景音乐淡入时长（秒）。")
-            render_grid.addWidget(QtWidgets.QLabel("淡入(s)"), 3, 0)
-            render_grid.addWidget(self.bgm_fade_in_spin, 3, 1)
+            # Subtitle effects / highlight
+            self.subtitle_highlight_mode_combo = QtWidgets.QComboBox()
+            self.subtitle_highlight_mode_combo.addItem("无", "none")
+            self.subtitle_highlight_mode_combo.addItem("整句高亮", "line")
+            self.subtitle_highlight_mode_combo.addItem("逐词高亮（Edge）", "word")
+            self.subtitle_highlight_mode_combo.setToolTip("高亮模式：整句/逐词。逐词需要 edge-tts 并生成 word_timings。")
+            render_grid.addWidget(QtWidgets.QLabel("高亮模式"), 3, 0)
+            render_grid.addWidget(self.subtitle_highlight_mode_combo, 3, 1)
 
-            self.bgm_fade_out_spin = QtWidgets.QDoubleSpinBox()
-            self.bgm_fade_out_spin.setRange(0.0, 30.0)
-            self.bgm_fade_out_spin.setSingleStep(0.5)
-            self.bgm_fade_out_spin.setDecimals(1)
-            self.bgm_fade_out_spin.setValue(0.0)
-            self.bgm_fade_out_spin.setToolTip("背景音乐淡出时长（秒）。")
-            render_grid.addWidget(QtWidgets.QLabel("淡出(s)"), 3, 2)
-            render_grid.addWidget(self.bgm_fade_out_spin, 3, 3)
+            self.subtitle_highlight_color_value = QtWidgets.QLineEdit()
+            self.subtitle_highlight_color_value.setReadOnly(True)
+            self.subtitle_highlight_color_value.setPlaceholderText("默认")
+            self.subtitle_highlight_color_btn = QtWidgets.QPushButton("选择…")
+            self.subtitle_highlight_color_clear_btn = QtWidgets.QPushButton("清除")
+            self.subtitle_highlight_color_preview = QtWidgets.QLabel("      ")
+            self.subtitle_highlight_color_preview.setToolTip("高亮颜色预览")
+            self.subtitle_highlight_color_preview.setStyleSheet("background: transparent; border: 1px solid #999;")
+            hi_row = QtWidgets.QHBoxLayout()
+            hi_row.addWidget(self.subtitle_highlight_color_preview)
+            hi_row.addWidget(self.subtitle_highlight_color_value, 1)
+            hi_row.addWidget(self.subtitle_highlight_color_btn)
+            hi_row.addWidget(self.subtitle_highlight_color_clear_btn)
+            render_grid.addWidget(QtWidgets.QLabel("高亮颜色"), 4, 0)
+            render_grid.addLayout(hi_row, 4, 1, 1, 3)
+
+            self.subtitle_fade_in_spin = QtWidgets.QSpinBox()
+            self.subtitle_fade_in_spin.setRange(0, 5000)
+            self.subtitle_fade_in_spin.setValue(80)
+            self.subtitle_fade_in_spin.setToolTip("逐句出现（淡入）时长，单位 ms。")
+            self.subtitle_fade_out_spin = QtWidgets.QSpinBox()
+            self.subtitle_fade_out_spin.setRange(0, 5000)
+            self.subtitle_fade_out_spin.setValue(120)
+            self.subtitle_fade_out_spin.setToolTip("逐句消失（淡出）时长，单位 ms。")
+            render_grid.addWidget(QtWidgets.QLabel("淡入/淡出(ms)"), 5, 0)
+            fade_row = QtWidgets.QHBoxLayout()
+            fade_row.addWidget(self.subtitle_fade_in_spin)
+            fade_row.addWidget(QtWidgets.QLabel("/"))
+            fade_row.addWidget(self.subtitle_fade_out_spin)
+            render_grid.addLayout(fade_row, 5, 1)
+
+            self.subtitle_scale_from_spin = QtWidgets.QSpinBox()
+            self.subtitle_scale_from_spin.setRange(50, 200)
+            self.subtitle_scale_from_spin.setValue(100)
+            self.subtitle_scale_to_spin = QtWidgets.QSpinBox()
+            self.subtitle_scale_to_spin.setRange(50, 200)
+            self.subtitle_scale_to_spin.setValue(104)
+            render_grid.addWidget(QtWidgets.QLabel("缩放(%)"), 6, 0)
+            scale_row = QtWidgets.QHBoxLayout()
+            scale_row.addWidget(self.subtitle_scale_from_spin)
+            scale_row.addWidget(QtWidgets.QLabel("→"))
+            scale_row.addWidget(self.subtitle_scale_to_spin)
+            render_grid.addLayout(scale_row, 6, 1)
+
+            self.subtitle_outline_spin = QtWidgets.QSpinBox()
+            self.subtitle_outline_spin.setRange(0, 20)
+            self.subtitle_outline_spin.setValue(1)
+            self.subtitle_shadow_spin = QtWidgets.QSpinBox()
+            self.subtitle_shadow_spin.setRange(0, 20)
+            self.subtitle_shadow_spin.setValue(0)
+            render_grid.addWidget(QtWidgets.QLabel("描边/阴影"), 7, 0)
+            os_row = QtWidgets.QHBoxLayout()
+            os_row.addWidget(self.subtitle_outline_spin)
+            os_row.addWidget(QtWidgets.QLabel("/"))
+            os_row.addWidget(self.subtitle_shadow_spin)
+            render_grid.addLayout(os_row, 7, 1)
 
             left.addStretch(1)
 
@@ -680,6 +823,8 @@ def _build_ui(QtWidgets):
             self.preview_reveal_btn.clicked.connect(self._reveal_last_preview)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
+            self.subtitle_highlight_color_btn.clicked.connect(self._pick_subtitle_highlight_color)
+            self.subtitle_highlight_color_clear_btn.clicked.connect(self._clear_subtitle_highlight_color)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
 
             self._restore_gui_state_from_config()
@@ -724,6 +869,58 @@ def _build_ui(QtWidgets):
 
             subc = _get_str("subtitle_color", "").strip()
             self._set_subtitle_color(subc or None)
+            hic = _get_str("subtitle_highlight_color", "").strip()
+            self._set_subtitle_highlight_color(hic or None)
+            try:
+                hm = _get_str("subtitle_highlight_mode", "none").strip().lower() or "none"
+                idx = self.subtitle_highlight_mode_combo.findData(hm)
+                if idx >= 0:
+                    self.subtitle_highlight_mode_combo.setCurrentIndex(idx)
+            except Exception:
+                pass
+            try:
+                self.subtitle_fade_in_spin.setValue(int(st.get("subtitle_fade_in_ms", self.subtitle_fade_in_spin.value())))
+            except Exception:
+                pass
+            try:
+                self.subtitle_fade_out_spin.setValue(
+                    int(st.get("subtitle_fade_out_ms", self.subtitle_fade_out_spin.value()))
+                )
+            except Exception:
+                pass
+            try:
+                self.subtitle_scale_from_spin.setValue(
+                    int(st.get("subtitle_scale_from", self.subtitle_scale_from_spin.value()))
+                )
+            except Exception:
+                pass
+            try:
+                self.subtitle_scale_to_spin.setValue(int(st.get("subtitle_scale_to", self.subtitle_scale_to_spin.value())))
+            except Exception:
+                pass
+            try:
+                self.subtitle_outline_spin.setValue(int(st.get("subtitle_outline", self.subtitle_outline_spin.value())))
+            except Exception:
+                pass
+            try:
+                self.subtitle_shadow_spin.setValue(int(st.get("subtitle_shadow", self.subtitle_shadow_spin.value())))
+            except Exception:
+                pass
+            font = _get_str("subtitle_font", "").strip()
+            try:
+                if font:
+                    idx = self.subtitle_font_edit.findText(font)
+                    if idx >= 0:
+                        self.subtitle_font_edit.setCurrentIndex(idx)
+                    else:
+                        self.subtitle_font_edit.setCurrentText(font)
+            except Exception:
+                pass
+            try:
+                raw = int(st.get("subtitle_size", self.subtitle_size_spin.value()) or 0)
+                self.subtitle_size_spin.setValue(raw if raw > 0 else 48)
+            except Exception:
+                pass
 
             self.bgm_path_edit.setText(_get_str("bgm_path", "").strip())
             try:
@@ -768,6 +965,16 @@ def _build_ui(QtWidgets):
                     "voice_id": self._current_voice_id(),
                     "tts_rate": float(self.tts_rate_spin.value()),
                     "subtitle_color": self.subtitle_color_value.text().strip(),
+                    "subtitle_highlight_mode": str(self.subtitle_highlight_mode_combo.currentData() or "none"),
+                    "subtitle_highlight_color": self.subtitle_highlight_color_value.text().strip(),
+                    "subtitle_fade_in_ms": int(self.subtitle_fade_in_spin.value()),
+                    "subtitle_fade_out_ms": int(self.subtitle_fade_out_spin.value()),
+                    "subtitle_scale_from": int(self.subtitle_scale_from_spin.value()),
+                    "subtitle_scale_to": int(self.subtitle_scale_to_spin.value()),
+                    "subtitle_outline": int(self.subtitle_outline_spin.value()),
+                    "subtitle_shadow": int(self.subtitle_shadow_spin.value()),
+                    "subtitle_font": self.subtitle_font_edit.currentText().strip(),
+                    "subtitle_size": int(self.subtitle_size_spin.value()),
                     "bgm_path": self.bgm_path_edit.text().strip(),
                     "bgm_volume": float(self.bgm_volume_spin.value()),
                     "narration_volume": float(self.narration_volume_spin.value()),
@@ -808,6 +1015,35 @@ def _build_ui(QtWidgets):
 
         def _clear_subtitle_color(self) -> None:
             self._set_subtitle_color(None)
+
+        def _set_subtitle_highlight_color(self, color_hex: str | None) -> None:
+            c = (color_hex or "").strip()
+            if not c:
+                self.subtitle_highlight_color_value.setText("")
+                self.subtitle_highlight_color_preview.setStyleSheet("background: transparent; border: 1px solid #999;")
+                return
+            if not c.startswith("#"):
+                c = "#" + c
+            self.subtitle_highlight_color_value.setText(c)
+            self.subtitle_highlight_color_preview.setStyleSheet(f"background: {c}; border: 1px solid #333;")
+
+        def _pick_subtitle_highlight_color(self) -> None:
+            QtWidgets = self._QtWidgets
+            try:
+                from PySide6.QtGui import QColor
+            except Exception:
+                QColor = None  # type: ignore
+            current = self.subtitle_highlight_color_value.text().strip() or "#FFD400"
+            dlg = QtWidgets.QColorDialog(self)
+            dlg.setOption(QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
+            if QColor is not None:
+                dlg.setCurrentColor(QColor(current))
+            if dlg.exec():
+                col = dlg.currentColor()
+                self._set_subtitle_highlight_color(col.name().upper())
+
+        def _clear_subtitle_highlight_color(self) -> None:
+            self._set_subtitle_highlight_color(None)
 
         def _pick_bgm(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1248,6 +1484,16 @@ def _build_ui(QtWidgets):
             voice_id = self._current_voice_id()
             tts_rate = float(self.tts_rate_spin.value())
             subtitle_color = self.subtitle_color_value.text().strip() or None
+            subtitle_highlight_mode = str(self.subtitle_highlight_mode_combo.currentData() or "none").strip() or "none"
+            subtitle_highlight_color = self.subtitle_highlight_color_value.text().strip() or None
+            subtitle_fade_in_ms = int(self.subtitle_fade_in_spin.value())
+            subtitle_fade_out_ms = int(self.subtitle_fade_out_spin.value())
+            subtitle_scale_from = int(self.subtitle_scale_from_spin.value())
+            subtitle_scale_to = int(self.subtitle_scale_to_spin.value())
+            subtitle_outline = int(self.subtitle_outline_spin.value())
+            subtitle_shadow = int(self.subtitle_shadow_spin.value())
+            subtitle_font = self.subtitle_font_edit.currentText().strip() or None
+            subtitle_size = int(self.subtitle_size_spin.value())
             bgm_path = self.bgm_path_edit.text().strip() or None
             bgm_volume = float(self.bgm_volume_spin.value())
             narration_volume = float(self.narration_volume_spin.value())
@@ -1269,6 +1515,16 @@ def _build_ui(QtWidgets):
                 tts_rate=tts_rate,
                 minimax_base_url=None,
                 subtitle_color=subtitle_color,
+                subtitle_highlight_mode=subtitle_highlight_mode,
+                subtitle_highlight_color=subtitle_highlight_color,
+                subtitle_fade_in_ms=subtitle_fade_in_ms,
+                subtitle_fade_out_ms=subtitle_fade_out_ms,
+                subtitle_scale_from=subtitle_scale_from,
+                subtitle_scale_to=subtitle_scale_to,
+                subtitle_outline=subtitle_outline,
+                subtitle_shadow=subtitle_shadow,
+                subtitle_font=subtitle_font,
+                subtitle_size=subtitle_size,
                 bgm_path=bgm_path,
                 bgm_volume=bgm_volume,
                 narration_volume=narration_volume,
@@ -1299,16 +1555,26 @@ def _build_ui(QtWidgets):
             t = (text or "").strip()
             if t == "阶段：extract":
                 self.progress.setValue(1)
-                self.progress.setFormat("进度：extract (1/4)")
+                self._pipeline_stage_label = "extract (1/4)"
+                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
             elif t == "阶段：voice":
                 self.progress.setValue(2)
-                self.progress.setFormat("进度：voice (2/4)")
+                self._pipeline_stage_label = "voice (2/4)"
+                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
             elif t == "阶段：subtitle":
                 self.progress.setValue(3)
-                self.progress.setFormat("进度：subtitle (3/4)")
+                self._pipeline_stage_label = "subtitle (3/4)"
+                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
             elif t == "阶段：render":
                 self.progress.setValue(4)
-                self.progress.setFormat("进度：render (4/4)")
+                self._pipeline_stage_label = "render (4/4)"
+                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
+            elif t.startswith("细节："):
+                detail = t[len("细节：") :].strip()
+                if self._pipeline_stage_label:
+                    self.progress.setFormat(f"进度：{self._pipeline_stage_label} · {detail}")
+                else:
+                    self.progress.setFormat(f"进度：{detail}")
             elif t.startswith("完成："):
                 # Keep as-is; final "退出码" will come next.
                 pass
@@ -1336,6 +1602,16 @@ def _build_ui(QtWidgets):
                     tts_rate=config.tts_rate,
                     minimax_base_url=config.minimax_base_url,
                     subtitle_color=config.subtitle_color,
+                    subtitle_highlight_mode=config.subtitle_highlight_mode,
+                    subtitle_highlight_color=config.subtitle_highlight_color,
+                    subtitle_fade_in_ms=config.subtitle_fade_in_ms,
+                    subtitle_fade_out_ms=config.subtitle_fade_out_ms,
+                    subtitle_scale_from=config.subtitle_scale_from,
+                    subtitle_scale_to=config.subtitle_scale_to,
+                    subtitle_outline=config.subtitle_outline,
+                    subtitle_shadow=config.subtitle_shadow,
+                    subtitle_font=config.subtitle_font,
+                    subtitle_size=config.subtitle_size,
                     bgm_path=config.bgm_path,
                     bgm_volume=config.bgm_volume,
                     narration_volume=config.narration_volume,

@@ -7,6 +7,8 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from note2video.subtitle.ass import build_ass
+
 
 class RenderError(RuntimeError):
     """Raised when final video rendering fails."""
@@ -22,6 +24,16 @@ def render_video(
     bgm_fade_in_s: float = 0.0,
     bgm_fade_out_s: float = 0.0,
     subtitle_color: str | None = None,
+    subtitle_highlight_color: str | None = None,
+    subtitle_highlight_mode: str | None = None,  # none|line|word
+    subtitle_fade_in_ms: int | None = None,
+    subtitle_fade_out_ms: int | None = None,
+    subtitle_scale_from: int | None = None,
+    subtitle_scale_to: int | None = None,
+    subtitle_outline: int | None = None,
+    subtitle_shadow: int | None = None,
+    subtitle_font: str | None = None,
+    subtitle_size: int | None = None,
 ) -> dict[str, Any]:
     root = Path(project_dir)
     manifest_path = root / "manifest.json"
@@ -48,6 +60,49 @@ def render_video(
     concat_file = video_dir / "slides.ffconcat"
     temp_video = video_dir / "video_only.mp4"
     subtitle_path = root / manifest.get("outputs", {}).get("subtitle", "subtitles/subtitles.srt")
+    subtitle_json_path = root / manifest.get("outputs", {}).get("subtitle_json", "subtitles/subtitles.json")
+    word_timings_path = root / manifest.get("outputs", {}).get("word_timings", "audio/word_timings.json")
+
+    # If advanced subtitle effects are requested, generate an ASS and burn that in.
+    hm = (subtitle_highlight_mode or "").strip().lower()
+    use_ass_effects = hm in {"line", "word"} or bool(subtitle_highlight_color)
+    if any(
+        v is not None
+        for v in (
+            subtitle_fade_in_ms,
+            subtitle_fade_out_ms,
+            subtitle_scale_from,
+            subtitle_scale_to,
+            subtitle_outline,
+            subtitle_shadow,
+        )
+    ):
+        use_ass_effects = True
+
+    if use_ass_effects and subtitle_json_path.exists():
+        segments = _load_subtitle_segments_for_ass(
+            subtitle_json_path=subtitle_json_path,
+            word_timings_path=word_timings_path if word_timings_path.exists() else None,
+            highlight_mode=hm,
+        )
+        ass_out = root / "subtitles" / "subtitles.effects.ass"
+        ass_out.parent.mkdir(parents=True, exist_ok=True)
+        ass_text = build_ass(
+            segments=segments,
+            highlight_mode=hm or "none",
+            base_color=subtitle_color or "#FFFFFF",
+            highlight_color=subtitle_highlight_color or "#FFD400",
+            fade_in_ms=subtitle_fade_in_ms if subtitle_fade_in_ms is not None else 80,
+            fade_out_ms=subtitle_fade_out_ms if subtitle_fade_out_ms is not None else 120,
+            scale_from=subtitle_scale_from if subtitle_scale_from is not None else 100,
+            scale_to=subtitle_scale_to if subtitle_scale_to is not None else 104,
+            outline=subtitle_outline if subtitle_outline is not None else 1,
+            shadow=subtitle_shadow if subtitle_shadow is not None else 0,
+            font=subtitle_font or "",
+            font_size=subtitle_size if subtitle_size is not None else 48,
+        )
+        ass_out.write_text(ass_text, encoding="utf-8")
+        subtitle_path = ass_out
 
     _write_ffconcat(root=root, slides=slides, concat_file=concat_file)
     ffmpeg = _get_ffmpeg_path()
@@ -144,7 +199,12 @@ def render_video(
     ]
 
     if subtitle_path.exists():
-        subtitle_filter = _build_subtitle_filter(subtitle_path, subtitle_color=subtitle_color)
+        subtitle_filter = _build_subtitle_filter(
+            subtitle_path,
+            subtitle_color=subtitle_color,
+            subtitle_font=subtitle_font,
+            subtitle_size=subtitle_size,
+        )
         mux_with_subtitles = [
             ffmpeg,
             "-y",
@@ -260,16 +320,72 @@ def _ass_primary_colour_from_rgb_hex(value: str) -> str:
     return f"&H00{bb}{gg}{rr}"
 
 
-def _build_subtitle_filter(subtitle_path: Path, *, subtitle_color: str | None = None) -> str:
+def _build_subtitle_filter(
+    subtitle_path: Path,
+    *,
+    subtitle_color: str | None = None,
+    subtitle_font: str | None = None,
+    subtitle_size: int | None = None,
+) -> str:
     value = str(subtitle_path.resolve()).replace("\\", "/")
     value = value.replace(":", "\\:").replace("'", r"\'")
+    style_parts: list[str] = []
     if subtitle_color:
         primary = _ass_primary_colour_from_rgb_hex(subtitle_color)
-        # Keep defaults but set primary colour; outline kept for readability.
+        style_parts.append(f"PrimaryColour={primary}")
+        # Keep outline for readability by default.
+        style_parts.append("Outline=1")
+        style_parts.append("Shadow=0")
+
+    font = (subtitle_font or "").strip()
+    if font:
+        # ASS style: FontName supports font family names. Keep it simple and avoid quoting;
+        # we escape the comma separators for ffmpeg's force_style.
+        style_parts.append(f"FontName={font}")
+
+    if subtitle_size is not None:
+        try:
+            size = int(subtitle_size)
+        except Exception:
+            size = 0
+        if size > 0:
+            style_parts.append(f"FontSize={size}")
+
+    if style_parts:
         # ffmpeg expects commas inside force_style to be escaped.
-        style = f"PrimaryColour={primary}\\,Outline=1\\,Shadow=0"
+        style = "\\,".join(style_parts)
         return f"subtitles='{value}':force_style='{style}'"
     return f"subtitles='{value}'"
+
+
+def _load_subtitle_segments_for_ass(
+    *,
+    subtitle_json_path: Path,
+    word_timings_path: Path | None,
+    highlight_mode: str,
+) -> list[dict[str, Any]]:
+    payload = json.loads(subtitle_json_path.read_text(encoding="utf-8"))
+    base_segments = payload.get("segments") or []
+    if not isinstance(base_segments, list):
+        return []
+
+    hm = (highlight_mode or "").strip().lower()
+    if hm != "word" or word_timings_path is None or not word_timings_path.exists():
+        return [seg for seg in base_segments if isinstance(seg, dict)]
+
+    w_payload = json.loads(word_timings_path.read_text(encoding="utf-8"))
+    w_segments = w_payload.get("segments") or []
+    if not isinstance(w_segments, list):
+        return [seg for seg in base_segments if isinstance(seg, dict)]
+
+    merged: list[dict[str, Any]] = []
+    for seg in w_segments:
+        if not isinstance(seg, dict):
+            continue
+        if "words" not in seg:
+            continue
+        merged.append(seg)
+    return merged or [seg for seg in base_segments if isinstance(seg, dict)]
 
 
 def _cleanup_render_intermediates(*, temp_video: Path, concat_file: Path) -> None:

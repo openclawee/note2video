@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from note2video.subtitle.ass import build_ass
+
 
 class SubtitleGenerationError(RuntimeError):
     """Raised when subtitle generation fails."""
@@ -42,9 +44,12 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
         durations = _load_slide_durations(manifest)
         segments = _build_segments(scripts=scripts, durations=durations)
     srt_path = subtitles_dir / "subtitles.srt"
+    ass_path = subtitles_dir / "subtitles.ass"
     json_path = subtitles_dir / "subtitles.json"
 
     srt_path.write_text(_render_srt(segments), encoding="utf-8")
+    # Always generate an ASS version too; it enables fade/scale/outline/shadow/highlight later.
+    ass_path.write_text(build_ass(segments=[segment.__dict__ for segment in segments]), encoding="utf-8")
     json_path.write_text(
         json.dumps(
             {"segments": [segment.__dict__ for segment in segments]},
@@ -56,6 +61,7 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
 
     outputs = manifest.setdefault("outputs", {})
     outputs["subtitle"] = "subtitles/subtitles.srt"
+    outputs["subtitle_ass"] = "subtitles/subtitles.ass"
     outputs["subtitle_json"] = "subtitles/subtitles.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -66,6 +72,7 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
 
     return {
         "subtitle": str(srt_path),
+        "subtitle_ass": str(ass_path),
         "subtitle_json": str(json_path),
         "segment_count": len(segments),
         "slide_count": len(scripts),
