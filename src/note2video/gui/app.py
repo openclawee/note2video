@@ -5,22 +5,19 @@ import sys
 import tempfile
 import traceback
 import faulthandler
-from datetime import datetime
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
 
-from note2video.publish import (
-    PublishPayload,
-    check_web_auth_status,
-    dump_publish_log,
-    login_with_browser,
-    merge_description_and_topics,
-    normalize_topics,
-    platform_upload_url,
-    profile_root_from_config,
-    publish_with_browser,
+from note2video.app.publish_service import (
+    PublishRequest,
+    build_publish_request,
+    check_publish_auth_status,
+    last_publish_status_lines,
+    perform_publish_execution,
+    perform_publish_login,
+    write_publish_record,
 )
 
 PREVIEW_SAMPLE_TEXT = "你好，这是一段音色试听。"
@@ -1768,57 +1765,23 @@ def _build_ui(QtWidgets, QtCore):
             self.extract_btn.setEnabled((not running) and (not self._pipeline_busy))
             self.build_btn.setEnabled((not running) and (not self._pipeline_busy))
 
-        def _resolve_publish_video_path(self) -> Path:
-            source = str(self.publish_video_source_combo.currentData() or "last_build")
-            if source == "manual":
-                manual = Path(self.publish_video_path_edit.text().strip().strip('"'))
-                if not manual.exists():
-                    raise ValueError("手动选择的视频文件不存在。")
-                return manual
-
-            out_dir = Path(self.out_edit.text().strip().strip('"'))
-            manifest_path = out_dir / "manifest.json"
-            if not manifest_path.exists():
-                raise ValueError("未找到 manifest.json，请先运行 Build。")
-            try:
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except Exception as exc:
-                raise ValueError(f"读取 manifest.json 失败：{exc}") from exc
-            rel_video = str((manifest.get("outputs") or {}).get("video") or "").strip()
-            if not rel_video:
-                raise ValueError("manifest.json 中没有 video 输出，请先运行 Build。")
-            candidate = Path(rel_video)
-            video_path = candidate if candidate.is_absolute() else (out_dir / candidate)
-            if not video_path.exists():
-                raise ValueError(f"视频文件不存在：{video_path}")
-            return video_path
-
-        def _collect_publish_payload(self) -> dict[str, Any]:
-            video_path = self._resolve_publish_video_path()
-            title = self.publish_title_edit.text().strip()
-            if not title:
-                raise ValueError("标题不能为空。")
-
-            cover_text = self.publish_cover_path_edit.text().strip()
-            if cover_text:
-                cover_path = Path(cover_text.strip('"'))
-                if not cover_path.exists():
-                    raise ValueError("封面图路径不存在。")
-
-            return {
-                "platform": str(self.publish_platform_combo.currentData() or "douyin"),
-                "method": str(self.publish_method_combo.currentData() or "web"),
-                "video_path": str(video_path),
-                "title": title,
-                "topics": self.publish_topics_edit.text().strip(),
-                "description": self.publish_description_edit.toPlainText().strip(),
-                "cover_path": cover_text,
-                "visibility": str(self.publish_visibility_combo.currentData() or "public"),
-                "schedule_enabled": bool(self.publish_schedule_chk.isChecked()),
-                "schedule_time": self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
-                "dry_run": bool(self.publish_dry_run_chk.isChecked()),
-                "auto_confirm": bool(self.publish_auto_confirm_chk.isChecked()),
-            }
+        def _build_publish_request(self) -> PublishRequest:
+            return PublishRequest(
+                platform=str(self.publish_platform_combo.currentData() or "douyin"),
+                method=str(self.publish_method_combo.currentData() or "web"),
+                video_source=str(self.publish_video_source_combo.currentData() or "last_build"),
+                out_dir=self.out_edit.text().strip(),
+                manual_video_path=self.publish_video_path_edit.text().strip(),
+                title=self.publish_title_edit.text().strip(),
+                topics=self.publish_topics_edit.text().strip(),
+                description=self.publish_description_edit.toPlainText().strip(),
+                cover_path=self.publish_cover_path_edit.text().strip(),
+                visibility=str(self.publish_visibility_combo.currentData() or "public"),
+                schedule_enabled=bool(self.publish_schedule_chk.isChecked()),
+                schedule_time=self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
+                dry_run=bool(self.publish_dry_run_chk.isChecked()),
+                auto_confirm=bool(self.publish_auto_confirm_chk.isChecked()),
+            )
 
         def _append_publish_result_row(
             self,
@@ -1837,29 +1800,6 @@ def _build_ui(QtWidgets, QtCore):
                 self.publish_result_table.setItem(row, col, self._QtWidgets.QTableWidgetItem(value))
             self.publish_result_table.resizeColumnsToContents()
 
-        def _profile_root_for_publish(self) -> Path:
-            from note2video.user_config import load_user_config, normalize_user_config
-
-            cfg = normalize_user_config(load_user_config())
-            return profile_root_from_config(cfg)
-
-        def _append_publish_log_to_disk(
-            self,
-            *,
-            payload: dict[str, Any],
-            result: dict[str, Any] | None = None,
-            error: str | None = None,
-        ) -> None:
-            out_dir = Path(self.out_edit.text().strip().strip('"') or "dist")
-            log_path = out_dir / "logs" / "publish.log"
-            record = {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "payload": payload,
-                "result": result or {},
-                "error": error or "",
-            }
-            dump_publish_log(log_path, record)
-
         def _publish_login(self) -> None:
             QtWidgets = self._QtWidgets
             platform = str(self.publish_platform_combo.currentData() or "douyin")
@@ -1869,9 +1809,9 @@ def _build_ui(QtWidgets, QtCore):
                 return
             self._append_publish_log(f"[auth] 正在打开浏览器登录：平台={platform}, 方式={method}")
             try:
-                result = login_with_browser(
+                result = perform_publish_login(
                     platform=platform,
-                    profile_root=self._profile_root_for_publish(),
+                    method=method,
                     wait_seconds=60,
                 )
             except Exception as exc:
@@ -1893,9 +1833,9 @@ def _build_ui(QtWidgets, QtCore):
                 self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 当前状态=未实现")
                 return
             try:
-                result = check_web_auth_status(
+                result = check_publish_auth_status(
                     platform=platform,
-                    profile_root=self._profile_root_for_publish(),
+                    method=method,
                     headless=True,
                 )
             except Exception as exc:
@@ -1917,27 +1857,14 @@ def _build_ui(QtWidgets, QtCore):
                 return
             if self._publish_busy:
                 return
+            request = self._build_publish_request()
             try:
-                payload = self._collect_publish_payload()
+                execution = build_publish_request(request)
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "发布参数错误", str(exc))
                 return
 
-            publish_payload = PublishPayload(
-                platform=str(payload["platform"]),
-                method=str(payload["method"]),
-                video_path=str(payload["video_path"]),
-                title=str(payload["title"]),
-                topics=str(payload["topics"]),
-                description=str(payload["description"]),
-                cover_path=str(payload["cover_path"]),
-                visibility=str(payload["visibility"]),
-                schedule_enabled=bool(payload["schedule_enabled"]),
-                schedule_time=str(payload["schedule_time"]),
-                dry_run=bool(payload["dry_run"]),
-                auto_confirm=bool(payload["auto_confirm"]),
-            )
-
+            payload = execution.ui_payload
             self._publish_last_payload = payload
             self.publish_log.clear()
             self._append_publish_log("开始发布任务（web 自动化）…")
@@ -1964,9 +1891,8 @@ def _build_ui(QtWidgets, QtCore):
                 self.publish_progress.setFormat(f"进度：{label} ({value}/5)")
 
             try:
-                result = publish_with_browser(
-                    publish_payload,
-                    profile_root=self._profile_root_for_publish(),
+                result = perform_publish_execution(
+                    execution,
                     headless=False,
                     stage_callback=_stage_callback,
                 )
@@ -1983,7 +1909,7 @@ def _build_ui(QtWidgets, QtCore):
                 self._append_publish_log(f"发布流程结束：{status}，{note}")
                 self.publish_progress.setValue(5)
                 self.publish_progress.setFormat(f"进度：{note or '完成'}")
-                self._append_publish_log_to_disk(payload=payload, result=result)
+                write_publish_record(log_path=execution.log_path, payload=payload, result=result)
             except Exception as exc:
                 err = str(exc)
                 self._append_publish_result_row(
@@ -1995,7 +1921,7 @@ def _build_ui(QtWidgets, QtCore):
                 )
                 self._append_publish_log(f"发布流程失败：{err}")
                 self.publish_progress.setFormat("进度：失败")
-                self._append_publish_log_to_disk(payload=payload, error=err)
+                write_publish_record(log_path=execution.log_path, payload=payload, error=err)
                 QtWidgets.QMessageBox.warning(self, "发布失败", err)
             finally:
                 self._publish_busy = False
@@ -2014,13 +1940,9 @@ def _build_ui(QtWidgets, QtCore):
             if self._publish_last_payload is None:
                 self._append_publish_log("暂无发布任务记录。")
                 return
-            payload = self._publish_last_payload
-            upload_url = platform_upload_url(str(payload.get("platform") or "douyin"))
-            self._append_publish_log(
-                "[status] 最近一次任务："
-                + f"platform={payload.get('platform')}, title={payload.get('title')}, method={payload.get('method')}"
-            )
-            self._append_publish_log(f"[status] 入口地址：{upload_url}")
+            line1, line2 = last_publish_status_lines(self._publish_last_payload)
+            self._append_publish_log(line1)
+            self._append_publish_log(line2)
 
         def _publish_retry_last(self) -> None:
             if self._publish_last_payload is None:
