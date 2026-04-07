@@ -479,13 +479,22 @@ def _build_ui(QtWidgets):
             self._preview_web_available: bool = False
             self._pipeline_busy = False
             self._pipeline_stage_label: str = ""
+            self._publish_busy = False
+            self._publish_timer: Any = None
+            self._publish_last_payload: dict[str, Any] | None = None
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
 
             layout = QtWidgets.QVBoxLayout(central)
+            self.tabs = QtWidgets.QTabWidget()
+            layout.addWidget(self.tabs)
+
+            build_tab = QtWidgets.QWidget()
+            self.tabs.addTab(build_tab, "制作")
+            build_tab_layout = QtWidgets.QVBoxLayout(build_tab)
             top = QtWidgets.QHBoxLayout()
-            layout.addLayout(top)
+            build_tab_layout.addLayout(top)
 
             left = QtWidgets.QVBoxLayout()
             right = QtWidgets.QVBoxLayout()
@@ -806,6 +815,150 @@ def _build_ui(QtWidgets):
             self.log.setReadOnly(True)
             right.addWidget(self.log, 1)
 
+            # --- Publish tab ---
+            publish_tab = QtWidgets.QWidget()
+            self.tabs.addTab(publish_tab, "发布")
+            publish_layout = QtWidgets.QVBoxLayout(publish_tab)
+
+            publish_account_group = QtWidgets.QGroupBox("账号与平台")
+            publish_account_grid = QtWidgets.QGridLayout(publish_account_group)
+            publish_account_grid.setColumnStretch(1, 1)
+            publish_account_grid.setColumnStretch(3, 1)
+            publish_layout.addWidget(publish_account_group)
+
+            self.publish_platform_combo = QtWidgets.QComboBox()
+            self.publish_platform_combo.addItem("抖音", "douyin")
+            self.publish_platform_combo.addItem("视频号", "channels")
+            publish_account_grid.addWidget(QtWidgets.QLabel("平台"), 0, 0)
+            publish_account_grid.addWidget(self.publish_platform_combo, 0, 1)
+
+            self.publish_method_combo = QtWidgets.QComboBox()
+            self.publish_method_combo.addItem("浏览器自动化（web）", "web")
+            self.publish_method_combo.addItem("开放 API（预留）", "api")
+            publish_account_grid.addWidget(QtWidgets.QLabel("方式"), 0, 2)
+            publish_account_grid.addWidget(self.publish_method_combo, 0, 3)
+
+            self.publish_auth_status_value = QtWidgets.QLabel("未检查")
+            self.publish_auth_status_value.setStyleSheet("color: gray;")
+            publish_account_grid.addWidget(QtWidgets.QLabel("登录状态"), 1, 0)
+            publish_account_grid.addWidget(self.publish_auth_status_value, 1, 1)
+
+            account_actions = QtWidgets.QHBoxLayout()
+            self.publish_login_btn = QtWidgets.QPushButton("登录 / 刷新登录")
+            self.publish_auth_status_btn = QtWidgets.QPushButton("检查登录状态")
+            account_actions.addWidget(self.publish_login_btn)
+            account_actions.addWidget(self.publish_auth_status_btn)
+            account_actions.addStretch(1)
+            publish_account_grid.addLayout(account_actions, 1, 2, 1, 2)
+
+            publish_content_group = QtWidgets.QGroupBox("发布内容")
+            publish_content_grid = QtWidgets.QGridLayout(publish_content_group)
+            publish_content_grid.setColumnStretch(1, 1)
+            publish_content_grid.setColumnStretch(3, 1)
+            publish_layout.addWidget(publish_content_group)
+
+            self.publish_video_source_combo = QtWidgets.QComboBox()
+            self.publish_video_source_combo.addItem("使用最近 Build 输出", "last_build")
+            self.publish_video_source_combo.addItem("手动选择视频", "manual")
+            publish_content_grid.addWidget(QtWidgets.QLabel("视频来源"), 0, 0)
+            publish_content_grid.addWidget(self.publish_video_source_combo, 0, 1)
+
+            self.publish_video_path_edit = QtWidgets.QLineEdit()
+            self.publish_video_path_btn = QtWidgets.QPushButton("选择…")
+            publish_video_row = QtWidgets.QHBoxLayout()
+            publish_video_row.addWidget(self.publish_video_path_edit, 1)
+            publish_video_row.addWidget(self.publish_video_path_btn)
+            publish_content_grid.addWidget(QtWidgets.QLabel("视频文件"), 1, 0)
+            publish_content_grid.addLayout(publish_video_row, 1, 1, 1, 3)
+
+            self.publish_title_edit = QtWidgets.QLineEdit()
+            self.publish_title_edit.setPlaceholderText("视频标题（建议简洁明确）")
+            publish_content_grid.addWidget(QtWidgets.QLabel("标题"), 2, 0)
+            publish_content_grid.addWidget(self.publish_title_edit, 2, 1, 1, 3)
+
+            self.publish_topics_edit = QtWidgets.QLineEdit()
+            self.publish_topics_edit.setPlaceholderText("话题标签，逗号分隔。例如：AI,教学,效率")
+            publish_content_grid.addWidget(QtWidgets.QLabel("话题"), 3, 0)
+            publish_content_grid.addWidget(self.publish_topics_edit, 3, 1, 1, 3)
+
+            self.publish_description_edit = QtWidgets.QPlainTextEdit()
+            self.publish_description_edit.setPlaceholderText("描述 / 简介（可选）")
+            self.publish_description_edit.setMinimumHeight(72)
+            publish_content_grid.addWidget(QtWidgets.QLabel("描述"), 4, 0)
+            publish_content_grid.addWidget(self.publish_description_edit, 4, 1, 1, 3)
+
+            self.publish_cover_path_edit = QtWidgets.QLineEdit()
+            self.publish_cover_path_btn = QtWidgets.QPushButton("选择…")
+            publish_cover_row = QtWidgets.QHBoxLayout()
+            publish_cover_row.addWidget(self.publish_cover_path_edit, 1)
+            publish_cover_row.addWidget(self.publish_cover_path_btn)
+            publish_content_grid.addWidget(QtWidgets.QLabel("封面图"), 5, 0)
+            publish_content_grid.addLayout(publish_cover_row, 5, 1, 1, 3)
+
+            self.publish_visibility_combo = QtWidgets.QComboBox()
+            self.publish_visibility_combo.addItem("公开", "public")
+            self.publish_visibility_combo.addItem("仅自己可见", "private")
+            publish_content_grid.addWidget(QtWidgets.QLabel("可见性"), 6, 0)
+            publish_content_grid.addWidget(self.publish_visibility_combo, 6, 1)
+
+            self.publish_schedule_chk = QtWidgets.QCheckBox("定时发布")
+            self.publish_schedule_time = QtWidgets.QDateTimeEdit()
+            self.publish_schedule_time.setCalendarPopup(True)
+            self.publish_schedule_time.setDateTime(self._QtCore.QDateTime.currentDateTime())
+            self.publish_schedule_time.setEnabled(False)
+            schedule_row = QtWidgets.QHBoxLayout()
+            schedule_row.addWidget(self.publish_schedule_chk)
+            schedule_row.addWidget(self.publish_schedule_time, 1)
+            publish_content_grid.addLayout(schedule_row, 6, 2, 1, 2)
+
+            publish_exec_group = QtWidgets.QGroupBox("发布执行")
+            publish_exec_v = QtWidgets.QVBoxLayout(publish_exec_group)
+            publish_layout.addWidget(publish_exec_group)
+
+            publish_flags_row = QtWidgets.QHBoxLayout()
+            self.publish_dry_run_chk = QtWidgets.QCheckBox("Dry-run（填表不点发布）")
+            self.publish_auto_confirm_chk = QtWidgets.QCheckBox("自动确认发布")
+            publish_flags_row.addWidget(self.publish_dry_run_chk)
+            publish_flags_row.addWidget(self.publish_auto_confirm_chk)
+            publish_flags_row.addStretch(1)
+            publish_exec_v.addLayout(publish_flags_row)
+
+            publish_actions_row = QtWidgets.QHBoxLayout()
+            self.publish_start_btn = QtWidgets.QPushButton("开始发布")
+            self.publish_stop_btn = QtWidgets.QPushButton("停止当前发布")
+            self.publish_status_btn = QtWidgets.QPushButton("查询发布状态")
+            self.publish_retry_btn = QtWidgets.QPushButton("重试上次发布")
+            self.publish_stop_btn.setEnabled(False)
+            publish_actions_row.addWidget(self.publish_start_btn)
+            publish_actions_row.addWidget(self.publish_stop_btn)
+            publish_actions_row.addWidget(self.publish_status_btn)
+            publish_actions_row.addWidget(self.publish_retry_btn)
+            publish_actions_row.addStretch(1)
+            publish_exec_v.addLayout(publish_actions_row)
+
+            self.publish_progress = QtWidgets.QProgressBar()
+            self.publish_progress.setRange(0, 5)
+            self.publish_progress.setValue(0)
+            self.publish_progress.setFormat("就绪")
+            publish_exec_v.addWidget(self.publish_progress)
+
+            publish_result_group = QtWidgets.QGroupBox("发布结果")
+            publish_result_v = QtWidgets.QVBoxLayout(publish_result_group)
+            publish_layout.addWidget(publish_result_group, 1)
+
+            self.publish_result_table = QtWidgets.QTableWidget(0, 6)
+            self.publish_result_table.setHorizontalHeaderLabels(["时间", "平台", "标题", "状态", "发布ID", "备注"])
+            self.publish_result_table.verticalHeader().setVisible(False)
+            self.publish_result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+            self.publish_result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+            self.publish_result_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+            publish_result_v.addWidget(self.publish_result_table)
+
+            self.publish_log = QtWidgets.QPlainTextEdit()
+            self.publish_log.setReadOnly(True)
+            self.publish_log.setPlaceholderText("发布流程日志")
+            publish_result_v.addWidget(self.publish_log, 1)
+
             self._thread = None
             self._worker = None
 
@@ -826,8 +979,19 @@ def _build_ui(QtWidgets):
             self.subtitle_highlight_color_btn.clicked.connect(self._pick_subtitle_highlight_color)
             self.subtitle_highlight_color_clear_btn.clicked.connect(self._clear_subtitle_highlight_color)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
+            self.publish_video_path_btn.clicked.connect(self._pick_publish_video)
+            self.publish_cover_path_btn.clicked.connect(self._pick_publish_cover)
+            self.publish_video_source_combo.currentIndexChanged.connect(self._toggle_publish_manual_video_enabled)
+            self.publish_schedule_chk.toggled.connect(self.publish_schedule_time.setEnabled)
+            self.publish_login_btn.clicked.connect(self._publish_login)
+            self.publish_auth_status_btn.clicked.connect(self._publish_check_auth_status)
+            self.publish_start_btn.clicked.connect(self._start_publish)
+            self.publish_stop_btn.clicked.connect(self._stop_publish)
+            self.publish_status_btn.clicked.connect(self._publish_check_last_status)
+            self.publish_retry_btn.clicked.connect(self._publish_retry_last)
 
             self._restore_gui_state_from_config()
+            self._toggle_publish_manual_video_enabled()
 
         def closeEvent(self, event) -> None:  # noqa: N802
             try:
@@ -846,6 +1010,14 @@ def _build_ui(QtWidgets):
             def _get_str(key: str, default: str = "") -> str:
                 v = st.get(key)
                 return str(v) if v is not None else default
+
+            def _get_bool(key: str, default: bool = False) -> bool:
+                raw = st.get(key, default)
+                if isinstance(raw, bool):
+                    return raw
+                if isinstance(raw, (int, float)):
+                    return bool(raw)
+                return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
             self.pptx_edit.setText(_get_str("pptx_path", self.pptx_edit.text()))
             self.out_edit.setText(_get_str("out_dir", self.out_edit.text()))
@@ -942,6 +1114,47 @@ def _build_ui(QtWidgets):
             except Exception:
                 pass
 
+            platform = _get_str("publish_platform", "douyin").strip() or "douyin"
+            idx = self.publish_platform_combo.findData(platform)
+            self.publish_platform_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+            method = _get_str("publish_method", "web").strip() or "web"
+            idx = self.publish_method_combo.findData(method)
+            self.publish_method_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+            source = _get_str("publish_video_source", "last_build").strip() or "last_build"
+            idx = self.publish_video_source_combo.findData(source)
+            self.publish_video_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            self.publish_video_path_edit.setText(_get_str("publish_video_path", "").strip())
+            self.publish_title_edit.setText(_get_str("publish_title", "").strip())
+            self.publish_topics_edit.setText(_get_str("publish_topics", "").strip())
+            self.publish_description_edit.setPlainText(_get_str("publish_description", ""))
+            self.publish_cover_path_edit.setText(_get_str("publish_cover_path", "").strip())
+            self.publish_auth_status_value.setText(_get_str("publish_auth_status", "未检查"))
+
+            visibility = _get_str("publish_visibility", "public").strip() or "public"
+            idx = self.publish_visibility_combo.findData(visibility)
+            self.publish_visibility_combo.setCurrentIndex(idx if idx >= 0 else 0)
+
+            schedule_enabled = _get_bool("publish_schedule_enabled", False)
+            self.publish_schedule_chk.setChecked(schedule_enabled)
+            schedule_raw = _get_str("publish_schedule_time", "").strip()
+            if schedule_raw:
+                dt = self._QtCore.QDateTime.fromString(schedule_raw, self._publish_datetime_format())
+                if dt.isValid():
+                    self.publish_schedule_time.setDateTime(dt)
+            self.publish_schedule_time.setEnabled(schedule_enabled)
+
+            self.publish_dry_run_chk.setChecked(_get_bool("publish_dry_run", True))
+            self.publish_auto_confirm_chk.setChecked(_get_bool("publish_auto_confirm", False))
+
+            try:
+                active_tab = int(st.get("active_tab", 0) or 0)
+                if 0 <= active_tab < self.tabs.count():
+                    self.tabs.setCurrentIndex(active_tab)
+            except Exception:
+                pass
+
             # window geometry
             try:
                 w = int(st.get("window_w", 0) or 0)
@@ -980,6 +1193,21 @@ def _build_ui(QtWidgets):
                     "narration_volume": float(self.narration_volume_spin.value()),
                     "bgm_fade_in_s": float(self.bgm_fade_in_spin.value()),
                     "bgm_fade_out_s": float(self.bgm_fade_out_spin.value()),
+                    "active_tab": int(self.tabs.currentIndex()),
+                    "publish_platform": str(self.publish_platform_combo.currentData() or "douyin"),
+                    "publish_method": str(self.publish_method_combo.currentData() or "web"),
+                    "publish_video_source": str(self.publish_video_source_combo.currentData() or "last_build"),
+                    "publish_video_path": self.publish_video_path_edit.text().strip(),
+                    "publish_title": self.publish_title_edit.text().strip(),
+                    "publish_topics": self.publish_topics_edit.text().strip(),
+                    "publish_description": self.publish_description_edit.toPlainText().strip(),
+                    "publish_cover_path": self.publish_cover_path_edit.text().strip(),
+                    "publish_visibility": str(self.publish_visibility_combo.currentData() or "public"),
+                    "publish_schedule_enabled": bool(self.publish_schedule_chk.isChecked()),
+                    "publish_schedule_time": self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
+                    "publish_dry_run": bool(self.publish_dry_run_chk.isChecked()),
+                    "publish_auto_confirm": bool(self.publish_auto_confirm_chk.isChecked()),
+                    "publish_auth_status": self.publish_auth_status_value.text().strip(),
                     "window_w": int(self.size().width()),
                     "window_h": int(self.size().height()),
                 }
@@ -1476,6 +1704,244 @@ def _build_ui(QtWidgets):
             if path:
                 self.out_edit.setText(path)
 
+        def _pick_publish_video(self) -> None:
+            QtWidgets = self._QtWidgets
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择待发布视频",
+                self.publish_video_path_edit.text() or str(Path.cwd()),
+                "Video (*.mp4 *.mov *.mkv *.webm);;All files (*)",
+            )
+            if path:
+                self.publish_video_path_edit.setText(path)
+
+        def _pick_publish_cover(self) -> None:
+            QtWidgets = self._QtWidgets
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择封面图（可选）",
+                self.publish_cover_path_edit.text() or str(Path.cwd()),
+                "Image (*.png *.jpg *.jpeg *.webp);;All files (*)",
+            )
+            if path:
+                self.publish_cover_path_edit.setText(path)
+
+        def _toggle_publish_manual_video_enabled(self) -> None:
+            source = str(self.publish_video_source_combo.currentData() or "last_build")
+            manual = source == "manual"
+            self.publish_video_path_edit.setEnabled(manual)
+            self.publish_video_path_btn.setEnabled(manual)
+
+        def _publish_datetime_format(self) -> str:
+            return "yyyy-MM-dd HH:mm:ss"
+
+        def _append_publish_log(self, text: str) -> None:
+            self.publish_log.appendPlainText(text.rstrip("\n"))
+
+        def _set_publish_running(self, running: bool) -> None:
+            self.publish_start_btn.setEnabled((not running) and (not self._pipeline_busy))
+            self.publish_stop_btn.setEnabled(running)
+            self.publish_status_btn.setEnabled(not running)
+            self.publish_retry_btn.setEnabled(not running and self._publish_last_payload is not None)
+            self.publish_login_btn.setEnabled(not running)
+            self.publish_auth_status_btn.setEnabled(not running)
+            self.publish_platform_combo.setEnabled(not running)
+            self.publish_method_combo.setEnabled(not running)
+            self.publish_video_source_combo.setEnabled(not running)
+            self.publish_dry_run_chk.setEnabled(not running)
+            self.publish_auto_confirm_chk.setEnabled(not running)
+            self.publish_schedule_chk.setEnabled(not running)
+            self.publish_schedule_time.setEnabled((not running) and self.publish_schedule_chk.isChecked())
+            self.extract_btn.setEnabled((not running) and (not self._pipeline_busy))
+            self.build_btn.setEnabled((not running) and (not self._pipeline_busy))
+
+        def _resolve_publish_video_path(self) -> Path:
+            source = str(self.publish_video_source_combo.currentData() or "last_build")
+            if source == "manual":
+                manual = Path(self.publish_video_path_edit.text().strip().strip('"'))
+                if not manual.exists():
+                    raise ValueError("手动选择的视频文件不存在。")
+                return manual
+
+            out_dir = Path(self.out_edit.text().strip().strip('"'))
+            manifest_path = out_dir / "manifest.json"
+            if not manifest_path.exists():
+                raise ValueError("未找到 manifest.json，请先运行 Build。")
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception as exc:
+                raise ValueError(f"读取 manifest.json 失败：{exc}") from exc
+            rel_video = str((manifest.get("outputs") or {}).get("video") or "").strip()
+            if not rel_video:
+                raise ValueError("manifest.json 中没有 video 输出，请先运行 Build。")
+            candidate = Path(rel_video)
+            video_path = candidate if candidate.is_absolute() else (out_dir / candidate)
+            if not video_path.exists():
+                raise ValueError(f"视频文件不存在：{video_path}")
+            return video_path
+
+        def _collect_publish_payload(self) -> dict[str, Any]:
+            video_path = self._resolve_publish_video_path()
+            title = self.publish_title_edit.text().strip()
+            if not title:
+                raise ValueError("标题不能为空。")
+
+            cover_text = self.publish_cover_path_edit.text().strip()
+            if cover_text:
+                cover_path = Path(cover_text.strip('"'))
+                if not cover_path.exists():
+                    raise ValueError("封面图路径不存在。")
+
+            return {
+                "platform": str(self.publish_platform_combo.currentData() or "douyin"),
+                "method": str(self.publish_method_combo.currentData() or "web"),
+                "video_path": str(video_path),
+                "title": title,
+                "topics": self.publish_topics_edit.text().strip(),
+                "description": self.publish_description_edit.toPlainText().strip(),
+                "cover_path": cover_text,
+                "visibility": str(self.publish_visibility_combo.currentData() or "public"),
+                "schedule_enabled": bool(self.publish_schedule_chk.isChecked()),
+                "schedule_time": self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
+                "dry_run": bool(self.publish_dry_run_chk.isChecked()),
+                "auto_confirm": bool(self.publish_auto_confirm_chk.isChecked()),
+            }
+
+        def _append_publish_result_row(
+            self,
+            *,
+            platform: str,
+            title: str,
+            status: str,
+            publish_id: str,
+            note: str,
+        ) -> None:
+            now_str = self._QtCore.QDateTime.currentDateTime().toString(self._publish_datetime_format())
+            row = self.publish_result_table.rowCount()
+            self.publish_result_table.insertRow(row)
+            values = [now_str, platform, title, status, publish_id, note]
+            for col, value in enumerate(values):
+                self.publish_result_table.setItem(row, col, self._QtWidgets.QTableWidgetItem(value))
+            self.publish_result_table.resizeColumnsToContents()
+
+        def _publish_login(self) -> None:
+            platform = str(self.publish_platform_combo.currentData() or "douyin")
+            method = str(self.publish_method_combo.currentData() or "web")
+            self.publish_auth_status_value.setText("已登录（模拟）")
+            self._append_publish_log(f"[auth] 平台={platform}, 方式={method}，请在后续接入真实浏览器自动化登录。")
+
+        def _publish_check_auth_status(self) -> None:
+            platform = str(self.publish_platform_combo.currentData() or "douyin")
+            method = str(self.publish_method_combo.currentData() or "web")
+            status = self.publish_auth_status_value.text().strip() or "未检查"
+            self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 当前状态={status}")
+
+        def _start_publish(self) -> None:
+            QtCore = self._QtCore
+            QtWidgets = self._QtWidgets
+            if self._pipeline_busy:
+                QtWidgets.QMessageBox.information(self, "发布", "正在执行 Extract/Build，请稍后再发布。")
+                return
+            if self._publish_busy:
+                return
+            try:
+                payload = self._collect_publish_payload()
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "发布参数错误", str(exc))
+                return
+
+            self._publish_last_payload = payload
+            self.publish_log.clear()
+            self._append_publish_log("开始发布任务（当前为 UI 骨架流程）…")
+            self._append_publish_log(f"platform={payload['platform']}, method={payload['method']}, video={payload['video_path']}")
+            self._publish_busy = True
+            self._set_publish_running(True)
+            self.publish_progress.setValue(0)
+            self.publish_progress.setFormat("进度：准备中 (0/5)")
+
+            steps = [
+                ("检查登录状态", 1),
+                ("上传视频文件", 2),
+                ("填写发布信息", 3),
+                ("等待发布确认", 4),
+                ("完成", 5),
+            ]
+            if payload.get("dry_run"):
+                steps[-1] = ("完成（dry-run，未点击发布）", 5)
+
+            timer = QtCore.QTimer(self)
+            timer.setInterval(320)
+            self._publish_timer = timer
+            cursor = {"i": 0}
+
+            def _finish(status: str, note: str) -> None:
+                if timer.isActive():
+                    timer.stop()
+                self._publish_timer = None
+                self._publish_busy = False
+                self._set_publish_running(False)
+                publish_id = (
+                    f"stub-{QtCore.QDateTime.currentDateTime().toString('yyyyMMddHHmmss')}"
+                    if status == "ok"
+                    else ""
+                )
+                self._append_publish_result_row(
+                    platform=str(payload["platform"]),
+                    title=str(payload["title"]),
+                    status=status,
+                    publish_id=publish_id,
+                    note=note,
+                )
+                self._append_publish_log(f"发布流程结束：{status}，{note}")
+                self.publish_progress.setFormat(f"进度：{note}")
+
+            def _tick() -> None:
+                i = cursor["i"]
+                if i >= len(steps):
+                    done_note = "dry-run 完成" if payload.get("dry_run") else "发布任务已提交（骨架模拟）"
+                    _finish("ok", done_note)
+                    return
+                label, value = steps[i]
+                self._append_publish_log(f"阶段：{label}")
+                self.publish_progress.setValue(value)
+                self.publish_progress.setFormat(f"进度：{label} ({value}/5)")
+                cursor["i"] = i + 1
+
+            timer.timeout.connect(_tick)
+            timer.start()
+            _tick()
+
+        def _stop_publish(self) -> None:
+            if not self._publish_busy:
+                return
+            if self._publish_timer is not None:
+                try:
+                    self._publish_timer.stop()
+                except Exception:
+                    pass
+                self._publish_timer = None
+            self._publish_busy = False
+            self._set_publish_running(False)
+            self._append_publish_log("已停止当前发布任务（best-effort）。")
+            self.publish_progress.setFormat("已停止")
+
+        def _publish_check_last_status(self) -> None:
+            if self._publish_last_payload is None:
+                self._append_publish_log("暂无发布任务记录。")
+                return
+            payload = self._publish_last_payload
+            self._append_publish_log(
+                "[status] 最近一次任务："
+                + f"platform={payload.get('platform')}, title={payload.get('title')}, method={payload.get('method')}"
+            )
+
+        def _publish_retry_last(self) -> None:
+            if self._publish_last_payload is None:
+                self._append_publish_log("没有可重试的发布任务。")
+                return
+            self._append_publish_log("重试最近一次发布任务…")
+            self._start_publish()
+
         def _validate(self) -> JobConfig:
             pptx = Path(self.pptx_edit.text().strip().strip('"'))
             out_dir = Path(self.out_edit.text().strip().strip('"'))
@@ -1543,6 +2009,12 @@ def _build_ui(QtWidgets):
             self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
             self.progress.setEnabled(True)
+            if hasattr(self, "publish_start_btn"):
+                self.publish_start_btn.setEnabled((not running) and (not self._publish_busy))
+                self.publish_status_btn.setEnabled((not running) and (not self._publish_busy))
+                self.publish_retry_btn.setEnabled((not running) and (not self._publish_busy))
+                self.publish_login_btn.setEnabled((not running) and (not self._publish_busy))
+                self.publish_auth_status_btn.setEnabled((not running) and (not self._publish_busy))
             if not running:
                 # Keep the last progress visible; mark idle explicitly.
                 if self.progress.value() >= 4:
@@ -1585,6 +2057,10 @@ def _build_ui(QtWidgets):
 
             if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听进行中，请等待试听完成后再执行任务。")
+                return
+
+            if self._publish_busy:
+                self._append_log("发布任务进行中，请等待发布流程结束后再执行制作任务。")
                 return
 
             if self._thread is not None or self._pipeline_busy:
