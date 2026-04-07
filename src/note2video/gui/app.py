@@ -19,6 +19,12 @@ from note2video.app.publish_service import (
     perform_publish_login,
     write_publish_record,
 )
+from note2video.app.pipeline_service import (
+    BuildRequest,
+    ExtractRequest,
+    run_build_pipeline,
+    run_extract_pipeline,
+)
 
 PREVIEW_SAMPLE_TEXT = "你好，这是一段音色试听。"
 
@@ -360,11 +366,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_extract_or_build(config: JobConfig, emit_log) -> int:
-    from note2video.parser.extract import extract_project
-    from note2video.render.video import render_video
-    from note2video.subtitle.generate import generate_subtitles
-    from note2video.tts.voice import generate_voice_assets
-
     emit_log(f"mode: {config.mode}")
     emit_log(f"pptx: {config.pptx_path}")
     emit_log(f"out:  {config.out_dir}")
@@ -372,68 +373,59 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
     emit_log(f"tts_rate: {config.tts_rate}")
 
     emit_log("阶段：extract")
-    manifest = extract_project(str(config.pptx_path), str(config.out_dir), pages=config.pages)
-    try:
-        emit_log(f"细节：slides={getattr(manifest, 'slide_count', '?')}")
-    except Exception:
-        pass
+    extract_result = run_extract_pipeline(
+        ExtractRequest(
+            input_file=str(config.pptx_path),
+            out_dir=str(config.out_dir),
+            pages=config.pages,
+        )
+    )
+    emit_log(f"细节：slides={extract_result.get('slide_count')}")
 
     if config.mode == "extract":
         emit_log("完成：extract")
         return 0
 
-    emit_log("阶段：voice")
-    script_path = config.out_dir / "scripts" / "script.json"
-    voice_result = generate_voice_assets(
-        str(script_path),
-        str(config.out_dir),
-        provider_name=(config.tts_provider or "pyttsx3"),
+    build_request = BuildRequest(
+        input_file=str(config.pptx_path),
+        out_dir=str(config.out_dir),
+        pages=config.pages,
+        tts_provider=(config.tts_provider or "pyttsx3"),
         voice_id=config.voice_id,
-        tts_rate=config.tts_rate,
-        minimax_base_url=config.minimax_base_url,
-    )
-    try:
-        emit_log(
-            "细节："
-            + f"provider={voice_result.get('provider')}, "
-            + f"voice={voice_result.get('voice')}, "
-            + f"tts_rate={voice_result.get('tts_rate')}"
-        )
-    except Exception:
-        pass
-
-    emit_log("阶段：subtitle")
-    sub_result = generate_subtitles(str(script_path), str(config.out_dir))
-    try:
-        emit_log(f"细节：segments={sub_result.get('segment_count')}, slides={sub_result.get('slide_count')}")
-    except Exception:
-        pass
-
-    emit_log("阶段：render")
-    result = render_video(
-        str(config.out_dir),
-        subtitle_color=config.subtitle_color,
-        subtitle_highlight_mode=config.subtitle_highlight_mode,
-        subtitle_highlight_color=config.subtitle_highlight_color,
-        subtitle_fade_in_ms=config.subtitle_fade_in_ms,
-        subtitle_fade_out_ms=config.subtitle_fade_out_ms,
-        subtitle_scale_from=config.subtitle_scale_from,
-        subtitle_scale_to=config.subtitle_scale_to,
-        subtitle_outline=config.subtitle_outline,
-        subtitle_shadow=config.subtitle_shadow,
-        subtitle_font=config.subtitle_font,
-        subtitle_size=config.subtitle_size,
+        tts_rate=float(config.tts_rate),
         bgm_path=config.bgm_path,
         bgm_volume=float(config.bgm_volume),
         narration_volume=float(config.narration_volume),
         bgm_fade_in_s=float(config.bgm_fade_in_s),
         bgm_fade_out_s=float(config.bgm_fade_out_s),
+        subtitle_color=config.subtitle_color,
+        subtitle_highlight_mode=config.subtitle_highlight_mode,
+        subtitle_highlight_color=config.subtitle_highlight_color,
+        subtitle_fade_in_ms=int(config.subtitle_fade_in_ms or 80),
+        subtitle_fade_out_ms=int(config.subtitle_fade_out_ms or 120),
+        subtitle_scale_from=int(config.subtitle_scale_from or 100),
+        subtitle_scale_to=int(config.subtitle_scale_to or 104),
+        subtitle_outline=int(config.subtitle_outline or 1),
+        subtitle_shadow=int(config.subtitle_shadow or 0),
+        subtitle_font=config.subtitle_font,
+        subtitle_size=config.subtitle_size,
     )
-    try:
-        emit_log(f"细节：subtitles_burned={result.get('subtitles_burned')}, mixed_audio={bool(result.get('mixed_audio'))}")
-    except Exception:
-        pass
-    emit_log(f"输出视频：{result.get('video')}")
+    build_result = run_build_pipeline(build_request)
+
+    emit_log("阶段：voice")
+    emit_log(
+        "细节："
+        + f"provider={build_result.get('voice_provider')}, "
+        + f"voice={build_request.voice_id or 'default'}, "
+        + f"tts_rate={build_request.tts_rate}"
+    )
+
+    emit_log("阶段：subtitle")
+    emit_log(f"细节：segments={build_result.get('segment_count')}, slides={build_result.get('slide_count')}")
+
+    emit_log("阶段：render")
+    emit_log(f"细节：subtitles_burned={build_result.get('subtitles_burned')}, mixed_audio=False")
+    emit_log(f"输出视频：{build_result.get('artifacts', {}).get('video')}")
 
     emit_log("完成：build")
     return 0
