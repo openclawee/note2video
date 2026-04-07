@@ -59,6 +59,29 @@
 note2video build input.pptx --out ./dist
 ```
 
+## Windows GUI（PySide6）
+
+安装 GUI 依赖：
+
+```bash
+python -m pip install -e ".[gui]"
+```
+
+启动界面：
+
+```bash
+note2video-gui
+```
+
+MiniMax 相关项可在菜单 **设置 → MiniMax 与模型…** 中编辑并保存到用户配置文件（路径见下方 MiniMax 小节）。
+
+打包 exe（PyInstaller，建议在干净 venv 中执行）：
+
+```bash
+python -m pip install -e ".[gui,dev]"
+pyinstaller --noconsole --name note2video-gui -m note2video.gui.app
+```
+
 当前 `build` 已经会串联执行：
 
 - `extract`
@@ -76,6 +99,46 @@ note2video build input.pptx --out ./dist
 - `render`：根据准备好的素材渲染最终视频
 
 详细命令说明见 `docs/cli.md`。
+
+## MiniMax（mimax）TTS（可选）
+
+本项目支持通过 MiniMax 的 **HTTP T2A API** 生成配音，方便后续替换为其他云端 TTS（统一走 API 适配层）。
+
+**国内版与国际版的 API 主机不同，密钥必须在对应主机上使用**，否则会返回 `invalid api key (2049)` 一类错误。请在你申请 Key 的开放平台说明里确认域名；常见对照如下（以官方 MCP 说明为准，若有变更以控制台为准）：
+
+| 账号/控制台 | 常见 API 主机（origin） |
+|-------------|-------------------------|
+| 中国大陆开放平台 | `https://api.minimax.chat` |
+| 国际版 | `https://api.minimaxi.chat`（域名中多一个 **i**） |
+| 部分国际站 OpenAPI 文档示例 | `https://api.minimax.io` |
+
+启用方式：
+
+- 在 CLI/GUI 里选择 provider：
+  - 国内：`minimax_cn`（固定主机 `https://api.minimax.chat`）
+  - 国际：`minimax_global`（固定主机 `https://api.minimaxi.chat`）
+- 密钥：**`NOTE2VIDEO_MINIMAX_API_KEY`** 或 **`MINIMAX_API_KEY`**（也可在 GUI 设置里保存到用户配置文件）
+- 可选：`NOTE2VIDEO_MINIMAX_MODEL`（默认 `speech-2.8-hd`）
+- 可选：`NOTE2VIDEO_MINIMAX_TIMEOUT_S`（不设置时：合成约 60s、列音色约 30s）
+
+**用户配置文件**（与 GUI「设置 → MiniMax 与模型…」写入同一份，可避免每次启动再配环境变量）：
+
+- **Windows**：`%LOCALAPPDATA%\note2video\config.json`
+- **Linux / macOS**：`~/.config/note2video/config.json`
+
+支持字段（JSON，新结构）：`tts.default_provider`，以及 `tts.providers.minimax_cn.api_key`、`tts.providers.minimax_cn.model`、`tts.providers.minimax_cn.timeout_s`，以及 `tts.providers.minimax_global.api_key`、`tts.providers.minimax_global.model`、`tts.providers.minimax_global.timeout_s`（`timeout_s` 可选整数秒）。**优先级**：环境变量高于配置文件。
+
+CLI 也可临时指定（会覆盖当次请求使用的 host，仍须与 Key 匹配）：
+
+```bash
+note2video build input.pptx --out ./dist --tts-provider minimax_cn --voice "Chinese (Mandarin)_News_Anchor" --tts-rate 1.1
+```
+
+示例（依赖环境变量已正确配置主机）：
+
+```bash
+note2video build input.pptx --out ./dist --tts-provider minimax --voice "Chinese (Mandarin)_News_Anchor" --tts-rate 1.1
+```
 
 ## 平台与幻灯片导出
 

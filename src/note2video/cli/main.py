@@ -31,6 +31,28 @@ def build_parser() -> argparse.ArgumentParser:
     build_cmd.add_argument("--pages", default="all", help="Page selection, e.g. 1-3,5.")
     build_cmd.add_argument("--voice", default="", help="Voice ID placeholder.")
     build_cmd.add_argument("--tts-provider", default="", help="TTS provider placeholder.")
+    build_cmd.add_argument(
+        "--tts-rate",
+        type=float,
+        default=1.0,
+        help="Speech rate multiplier (0.5–2.0); applied during TTS so subtitles stay aligned.",
+    )
+    build_cmd.add_argument("--bgm", default="", help="Optional background music file to mix into the final video.")
+    build_cmd.add_argument("--bgm-volume", type=float, default=0.18, help="Background music volume (default 0.18).")
+    build_cmd.add_argument("--bgm-fade-in", type=float, default=0.0, help="BGM fade-in seconds (default 0).")
+    build_cmd.add_argument("--bgm-fade-out", type=float, default=0.0, help="BGM fade-out seconds (default 0).")
+    build_cmd.add_argument(
+        "--narration-volume",
+        type=float,
+        default=1.0,
+        help="Narration volume before mixing (default 1.0).",
+    )
+    build_cmd.add_argument(
+        "--subtitle-color",
+        default="",
+        help="Subtitle color when burning into video (hex #RRGGBB). Example: #FFFFFF",
+    )
+    # MiniMax CN/Global are separate providers; host selection is implied by --tts-provider.
     build_cmd.set_defaults(handler=handle_build)
 
     extract_cmd = subparsers.add_parser("extract", help="Extract slide assets and notes.")
@@ -44,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     voice_cmd.add_argument("input", help="Path to notes or script JSON.")
     voice_cmd.add_argument("--tts-provider", default="pyttsx3", help="TTS provider name.")
     voice_cmd.add_argument("--voice", default="", help="Voice ID.")
+    voice_cmd.add_argument(
+        "--tts-rate",
+        type=float,
+        default=1.0,
+        help="Speech rate multiplier (0.5–2.0); applied during TTS so subtitles stay aligned.",
+    )
+    # MiniMax CN/Global are separate providers; host selection is implied by --tts-provider.
     voice_cmd.set_defaults(handler=handle_voice)
 
     voices_cmd = subparsers.add_parser("voices", help="List available voices.")
@@ -65,6 +94,21 @@ def build_parser() -> argparse.ArgumentParser:
     render_cmd = subparsers.add_parser("render", help="Render the final video.")
     _add_common_arguments(render_cmd)
     render_cmd.add_argument("input", help="Path to the prepared work directory.")
+    render_cmd.add_argument("--bgm", default="", help="Optional background music file to mix into the final video.")
+    render_cmd.add_argument("--bgm-volume", type=float, default=0.18, help="Background music volume (default 0.18).")
+    render_cmd.add_argument("--bgm-fade-in", type=float, default=0.0, help="BGM fade-in seconds (default 0).")
+    render_cmd.add_argument("--bgm-fade-out", type=float, default=0.0, help="BGM fade-out seconds (default 0).")
+    render_cmd.add_argument(
+        "--narration-volume",
+        type=float,
+        default=1.0,
+        help="Narration volume before mixing (default 1.0).",
+    )
+    render_cmd.add_argument(
+        "--subtitle-color",
+        default="",
+        help="Subtitle color when burning into video (hex #RRGGBB). Example: #FFFFFF",
+    )
     render_cmd.set_defaults(handler=handle_render)
 
     return parser
@@ -90,9 +134,19 @@ def handle_build(args: argparse.Namespace) -> int:
         str(out_dir),
         provider_name=args.tts_provider or "pyttsx3",
         voice_id=args.voice,
+        tts_rate=args.tts_rate,
+        minimax_base_url=None,
     )
     subtitle_result = generate_subtitles(str(script_path), str(out_dir))
-    render_result = render_video(str(out_dir))
+    render_result = render_video(
+        str(out_dir),
+        bgm_path=(args.bgm.strip() or None),
+        bgm_volume=float(args.bgm_volume),
+        bgm_fade_in_s=float(args.bgm_fade_in),
+        bgm_fade_out_s=float(args.bgm_fade_out),
+        narration_volume=float(args.narration_volume),
+        subtitle_color=(args.subtitle_color.strip() or None),
+    )
 
     payload = {
         "command": "build",
@@ -139,6 +193,8 @@ def handle_voice(args: argparse.Namespace) -> int:
         args.out,
         provider_name=args.tts_provider,
         voice_id=args.voice,
+        tts_rate=args.tts_rate,
+        minimax_base_url=None,
     )
     payload = {
         "command": "voice",
@@ -148,6 +204,7 @@ def handle_voice(args: argparse.Namespace) -> int:
         "slide_count": result["slide_count"],
         "provider": result["provider"],
         "voice": result["voice"],
+        "tts_rate": result["tts_rate"],
         "artifacts": {
             "audio_dir": "audio",
             "merged_audio": "audio/merged.wav",
@@ -159,7 +216,11 @@ def handle_voice(args: argparse.Namespace) -> int:
 
 
 def handle_voices(args: argparse.Namespace) -> int:
-    voices = list_available_voices(provider_name=args.tts_provider, keyword=args.keyword)
+    voices = list_available_voices(
+        provider_name=args.tts_provider,
+        keyword=args.keyword,
+        minimax_base_url=None,
+    )
     payload = {
         "command": "voices",
         "status": "ok",
@@ -190,7 +251,16 @@ def handle_subtitle(args: argparse.Namespace) -> int:
 
 
 def handle_render(args: argparse.Namespace) -> int:
-    result = render_video(args.input, args.out if args.out != "./dist" else None)
+    result = render_video(
+        args.input,
+        args.out if args.out != "./dist" else None,
+        bgm_path=(args.bgm.strip() or None),
+        bgm_volume=float(args.bgm_volume),
+        bgm_fade_in_s=float(args.bgm_fade_in),
+        bgm_fade_out_s=float(args.bgm_fade_out),
+        narration_volume=float(args.narration_volume),
+        subtitle_color=(args.subtitle_color.strip() or None),
+    )
     payload = {
         "command": "render",
         "status": "ok",

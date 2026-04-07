@@ -22,6 +22,16 @@ dependencies = [
 
 [project.scripts]
 note2video = "note2video.cli.main:main"
+note2video-gui = "note2video.gui.app:main"
+
+[project.optional-dependencies]
+gui = [
+  "PySide6",
+]
+dev = [
+  "pytest",
+  "pyinstaller",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}

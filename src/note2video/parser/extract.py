@@ -64,10 +64,17 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     scripts_txt_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    slide_data, extractor = _extract_slide_data(input_path, slides_dir)
-    selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
-    if selected_pages is not None:
-        slide_data = [item for item in slide_data if item["page"] in selected_pages]
+    # Prefer counting slides without exporting images, so page selection doesn't generate all slide PNGs.
+    # If counting fails (e.g. tests using a placeholder file), fall back to extraction-driven counting.
+    try:
+        total_slides = _count_slides_openxml(input_path)
+        selected_pages = _parse_page_selection(pages, total_slides=total_slides)
+        slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=selected_pages)
+    except Exception:
+        slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=None)
+        selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
+        if selected_pages is not None:
+            slide_data = [item for item in slide_data if item["page"] in selected_pages]
 
     slides: list[SlideRecord] = []
     for item in slide_data:
@@ -160,22 +167,32 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     return manifest
 
 
-def _extract_slide_data(input_path: Path, slides_dir: Path) -> tuple[list[dict[str, Any]], str]:
+def _extract_slide_data(
+    input_path: Path,
+    slides_dir: Path,
+    *,
+    selected_pages: set[int] | None,
+) -> tuple[list[dict[str, Any]], str]:
     if sys.platform == "win32":
         try:
-            return _extract_with_powerpoint(input_path, slides_dir), "powerpoint-com"
+            return _extract_with_powerpoint(input_path, slides_dir, selected_pages=selected_pages), "powerpoint-com"
         except PowerPointUnavailableError:
             # Fallback keeps extraction available even when COM automation fails.
-            return _extract_with_openxml(input_path, slides_dir), "openxml-fallback"
+            return _extract_with_openxml(input_path, slides_dir, selected_pages=selected_pages), "openxml-fallback"
     if _should_try_libreoffice_export():
         try:
-            return _extract_with_libreoffice(input_path, slides_dir), "libreoffice"
+            return _extract_with_libreoffice(input_path, slides_dir, selected_pages=selected_pages), "libreoffice"
         except PowerPointUnavailableError:
             pass
-    return _extract_with_openxml(input_path, slides_dir), "openxml"
+    return _extract_with_openxml(input_path, slides_dir, selected_pages=selected_pages), "openxml"
 
 
-def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
+def _extract_with_powerpoint(
+    input_path: Path,
+    slides_dir: Path,
+    *,
+    selected_pages: set[int] | None = None,
+) -> list[dict[str, Any]]:
     """Use PowerPoint COM automation to export slide images and notes."""
     try:
         import pythoncom
@@ -202,6 +219,8 @@ def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[st
 
         records: list[dict[str, Any]] = []
         for index, slide in enumerate(presentation.Slides, start=1):
+            if selected_pages is not None and index not in selected_pages:
+                continue
             image_name = f"{index:03d}.png"
             image_path = slides_dir / image_name
             slide.Export(str(image_path.resolve()), "PNG")
@@ -229,11 +248,18 @@ def _extract_with_powerpoint(input_path: Path, slides_dir: Path) -> list[dict[st
         pythoncom.CoUninitialize()
 
 
-def _extract_with_openxml(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
+def _extract_with_openxml(
+    input_path: Path,
+    slides_dir: Path,
+    *,
+    selected_pages: set[int] | None = None,
+) -> list[dict[str, Any]]:
     try:
         records: list[dict[str, Any]] = []
         for item in _read_openxml_slide_records(input_path):
             index = item["page"]
+            if selected_pages is not None and index not in selected_pages:
+                continue
             image_name = f"{index:03d}.png"
             image_path = slides_dir / image_name
             _write_placeholder_slide_png(image_path, page=index, title=item["title"])
@@ -448,17 +474,23 @@ def _apply_png_sequence_to_slides(
     meta: list[dict[str, Any]],
     png_paths: list[Path],
     slides_dir: Path,
+    *,
+    selected_pages: set[int] | None = None,
 ) -> list[dict[str, Any]]:
     """Copy raster pages in order; pad missing slides with placeholders."""
     records: list[dict[str, Any]] = []
     for index, row in enumerate(meta):
         page = int(row["page"])
+        if selected_pages is not None and page not in selected_pages:
+            continue
         title = row["title"]
         raw_notes = row["raw_notes"]
         image_name = f"{page:03d}.png"
         dest = slides_dir / image_name
-        if index < len(png_paths):
-            shutil.copy2(png_paths[index], dest)
+        # Prefer page-based indexing for stability even when selected_pages skips items.
+        page_idx = page - 1
+        if 0 <= page_idx < len(png_paths):
+            shutil.copy2(png_paths[page_idx], dest)
         else:
             _write_placeholder_slide_png(dest, page=page, title=title)
         records.append(
@@ -472,7 +504,12 @@ def _apply_png_sequence_to_slides(
     return records
 
 
-def _extract_with_libreoffice(input_path: Path, slides_dir: Path) -> list[dict[str, Any]]:
+def _extract_with_libreoffice(
+    input_path: Path,
+    slides_dir: Path,
+    *,
+    selected_pages: set[int] | None = None,
+) -> list[dict[str, Any]]:
     soffice = _find_soffice()
     pdftoppm = _find_pdftoppm()
     if not soffice or not pdftoppm:
@@ -504,9 +541,18 @@ def _extract_with_libreoffice(input_path: Path, slides_dir: Path) -> list[dict[s
         if len(png_paths) > len(meta):
             png_paths = png_paths[: len(meta)]
 
-        return _apply_png_sequence_to_slides(meta, png_paths, slides_dir)
+        return _apply_png_sequence_to_slides(meta, png_paths, slides_dir, selected_pages=selected_pages)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _count_slides_openxml(input_path: Path) -> int:
+    """Fast slide count without exporting images; used for page selection parsing."""
+    with zipfile.ZipFile(input_path, "r") as pptx_file:
+        slide_paths = _list_slide_paths(pptx_file)
+        if not slide_paths:
+            raise ValueError("No slides found in .pptx package.")
+        return len(slide_paths)
 
 
 def _resolve_notes_slide_path(pptx_file: zipfile.ZipFile, slide_path: str) -> str | None:

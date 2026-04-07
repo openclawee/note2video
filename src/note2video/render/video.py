@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import wave
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +12,17 @@ class RenderError(RuntimeError):
     """Raised when final video rendering fails."""
 
 
-def render_video(project_dir: str, output_path: str | None = None) -> dict[str, Any]:
+def render_video(
+    project_dir: str,
+    output_path: str | None = None,
+    *,
+    bgm_path: str | None = None,
+    bgm_volume: float = 0.18,
+    narration_volume: float = 1.0,
+    bgm_fade_in_s: float = 0.0,
+    bgm_fade_out_s: float = 0.0,
+    subtitle_color: str | None = None,
+) -> dict[str, Any]:
     root = Path(project_dir)
     manifest_path = root / "manifest.json"
     if not manifest_path.exists():
@@ -26,8 +38,10 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
         raise RenderError("Merged audio file is missing. Run 'voice' first.")
 
     video_dir = root / "video"
+    audio_dir = root / "audio"
     logs_dir = root / "logs"
     video_dir.mkdir(parents=True, exist_ok=True)
+    audio_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     target_video = Path(output_path) if output_path else video_dir / "output.mp4"
@@ -37,6 +51,60 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
 
     _write_ffconcat(root=root, slides=slides, concat_file=concat_file)
     ffmpeg = _get_ffmpeg_path()
+
+    # Optional: mix background music with narration audio.
+    mix_used = False
+    mix_info = ""
+    mux_audio_path = audio_path
+    if bgm_path:
+        bgm = Path(bgm_path)
+        if not bgm.exists():
+            raise RenderError(f"BGM file not found: {bgm}")
+        narration_duration_s = _read_wav_duration_s(audio_path)
+        fade_in = max(0.0, float(bgm_fade_in_s or 0.0))
+        fade_out = max(0.0, float(bgm_fade_out_s or 0.0))
+        fade_out_start = max(0.0, narration_duration_s - fade_out)
+        # Write AAC audio for muxing (smaller/faster than WAV for intermediate).
+        mixed_audio = audio_dir / "mixed.m4a"
+        _run_ffmpeg(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(audio_path),
+                "-stream_loop",
+                "-1",
+                "-i",
+                str(bgm),
+                "-filter_complex",
+                (
+                    f"[0:a]volume={narration_volume:.3f}[nar];"
+                    f"[1:a]volume={bgm_volume:.3f},"
+                    f"afade=t=in:st=0:d={fade_in:.3f},"
+                    f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
+                    f"[bgm];"
+                    f"[nar][bgm]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.98[a]"
+                ),
+                "-map",
+                "[a]",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-shortest",
+                str(mixed_audio),
+            ]
+        )
+        mix_used = True
+        mix_info = (
+            f"bgm: {bgm}\n"
+            f"bgm_volume: {bgm_volume}\n"
+            f"narration_volume: {narration_volume}\n"
+            f"bgm_fade_in_s: {fade_in}\n"
+            f"bgm_fade_out_s: {fade_out}\n"
+            f"narration_duration_s: {narration_duration_s:.3f}\n"
+        )
+        mux_audio_path = mixed_audio
 
     _run_ffmpeg(
         [
@@ -67,7 +135,7 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
         "-i",
         str(temp_video),
         "-i",
-        str(audio_path),
+        str(mux_audio_path),
         "-c:v",
         "copy",
         "-c:a",
@@ -76,14 +144,14 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
     ]
 
     if subtitle_path.exists():
-        subtitle_filter = _build_subtitle_filter(subtitle_path)
+        subtitle_filter = _build_subtitle_filter(subtitle_path, subtitle_color=subtitle_color)
         mux_with_subtitles = [
             ffmpeg,
             "-y",
             "-i",
             str(temp_video),
             "-i",
-            str(audio_path),
+            str(mux_audio_path),
             "-vf",
             subtitle_filter,
             "-c:v",
@@ -110,7 +178,10 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
     _cleanup_render_intermediates(temp_video=temp_video, concat_file=concat_file)
 
     (logs_dir / "render.log").write_text(
-        f"video: {target_video}\nsubtitles_burned: {subtitle_burned}\n",
+        f"video: {target_video}\nsubtitles_burned: {subtitle_burned}\n"
+        f"audio: {mux_audio_path}\n"
+        f"mixed: {mix_used}\n"
+        f"{mix_info}",
         encoding="utf-8",
     )
 
@@ -118,6 +189,7 @@ def render_video(project_dir: str, output_path: str | None = None) -> dict[str, 
         "video": str(target_video),
         "subtitles_burned": subtitle_burned,
         "slide_count": len(slides),
+        "mixed_audio": str(mux_audio_path) if mix_used else None,
     }
 
 
@@ -153,14 +225,50 @@ def _get_ffmpeg_path() -> str:
 
 
 def _run_ffmpeg(command: list[str]) -> None:
-    result = subprocess.run(command, capture_output=True, text=True)
+    # Force a stable decode on Windows; ffmpeg may emit non-GBK bytes.
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if result.returncode != 0:
         raise RenderError(result.stderr.strip() or "ffmpeg command failed.")
 
 
-def _build_subtitle_filter(subtitle_path: Path) -> str:
+def _read_wav_duration_s(path: Path) -> float:
+    try:
+        with closing(wave.open(str(path), "rb")) as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            if rate <= 0:
+                return 0.0
+            return float(frames) / float(rate)
+    except Exception as exc:
+        raise RenderError(f"Unable to read WAV duration: {path} ({exc})") from exc
+
+
+def _ass_primary_colour_from_rgb_hex(value: str) -> str:
+    """
+    ASS colour format is &HAABBGGRR (hex).
+    Input supports #RRGGBB / RRGGBB.
+    """
+    raw = (value or "").strip()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    if len(raw) != 6 or any(ch not in "0123456789abcdefABCDEF" for ch in raw):
+        raise RenderError(f"Invalid subtitle_color: {value!r}. Expected #RRGGBB.")
+    rr = raw[0:2]
+    gg = raw[2:4]
+    bb = raw[4:6]
+    # AA=00 (opaque), then BB GG RR
+    return f"&H00{bb}{gg}{rr}"
+
+
+def _build_subtitle_filter(subtitle_path: Path, *, subtitle_color: str | None = None) -> str:
     value = str(subtitle_path.resolve()).replace("\\", "/")
     value = value.replace(":", "\\:").replace("'", r"\'")
+    if subtitle_color:
+        primary = _ass_primary_colour_from_rgb_hex(subtitle_color)
+        # Keep defaults but set primary colour; outline kept for readability.
+        # ffmpeg expects commas inside force_style to be escaped.
+        style = f"PrimaryColour={primary}\\,Outline=1\\,Shadow=0"
+        return f"subtitles='{value}':force_style='{style}'"
     return f"subtitles='{value}'"
 
 

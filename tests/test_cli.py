@@ -62,10 +62,10 @@ def test_voice_command_generates_audio_files(tmp_path, monkeypatch) -> None:
                 wav_file.setframerate(22050)
                 wav_file.writeframes(b"\x01\x02" * 22050)
 
-    monkeypatch.setattr(
-        "note2video.tts.voice._create_provider",
-        lambda provider_name, voice_id: FakeProvider(),
-    )
+    def fake_create_provider(*, provider_name, voice_id, tts_rate=1.0, minimax_base_url=None):
+        return FakeProvider()
+
+    monkeypatch.setattr("note2video.tts.voice._create_provider", fake_create_provider)
 
     exit_code = main(["voice", str(script_path), "--out", str(project_dir), "--json"])
 
@@ -262,16 +262,28 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
         (scripts_dir / "script.json").write_text('{"slides":[]}', encoding="utf-8")
         return SimpleNamespace(slide_count=3)
 
-    def fake_voice(input_json, out_dir, provider_name="pyttsx3", voice_id=""):
-        calls.append(("voice", input_json, out_dir, provider_name, voice_id))
-        return {"provider": provider_name, "slide_count": 3}
+    def fake_voice(input_json, out_dir, *, provider_name="pyttsx3", voice_id="", tts_rate=1.0, minimax_base_url=None):
+        calls.append(("voice", input_json, out_dir, provider_name, voice_id, tts_rate, minimax_base_url))
+        return {"provider": provider_name, "slide_count": 3, "tts_rate": tts_rate}
 
     def fake_subtitle(input_json, out_dir):
         calls.append(("subtitle", input_json, out_dir))
         return {"segment_count": 5}
 
-    def fake_render(project_dir):
-        calls.append(("render", project_dir))
+    def fake_render(
+        project_dir,
+        output_path=None,
+        *,
+        bgm_path=None,
+        bgm_volume=0.18,
+        bgm_fade_in_s=0.0,
+        bgm_fade_out_s=0.0,
+        narration_volume=1.0,
+        subtitle_color=None,
+    ):
+        calls.append(
+            ("render", project_dir, bgm_path, bgm_volume, bgm_fade_in_s, bgm_fade_out_s, narration_volume, subtitle_color)
+        )
         return {"video": "video/output.mp4", "subtitles_burned": True}
 
     monkeypatch.setattr("note2video.cli.main.extract_project", fake_extract)
@@ -297,14 +309,14 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
     assert calls[0] == ("extract", str(input_file), str(output_dir), "1-3")
     assert calls[1][0] == "voice"
     assert calls[2][0] == "subtitle"
-    assert calls[3] == ("render", str(output_dir))
+    assert calls[3] == ("render", str(output_dir), None, 0.18, 0.0, 0.0, 1.0, None)
 
 
 def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
 
-    def fake_extract_slide_data(_input_path, _slides_dir):
+    def fake_extract_slide_data(_input_path, _slides_dir, *, selected_pages=None):
         return [
             {
                 "page": 1,
@@ -347,17 +359,21 @@ def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
 
-    def fake_extract_slide_data(_input_path, _slides_dir):
-        return [
+    def fake_extract_slide_data(_input_path, _slides_dir, *, selected_pages=None):
+        items = [
             {"page": 1, "title": "A", "image": "slides/001.png", "raw_notes": "one"},
             {"page": 2, "title": "B", "image": "slides/002.png", "raw_notes": "two"},
             {"page": 3, "title": "C", "image": "slides/003.png", "raw_notes": "three"},
-        ], "mock-extractor"
+        ]
+        if selected_pages is not None:
+            items = [x for x in items if x["page"] in selected_pages]
+        return items, "mock-extractor"
 
     monkeypatch.setattr(
         "note2video.parser.extract._extract_slide_data",
         fake_extract_slide_data,
     )
+    monkeypatch.setattr("note2video.parser.extract._count_slides_openxml", lambda _p: 3)
 
     output_dir = tmp_path / "dist"
     exit_code = main(
@@ -368,6 +384,10 @@ def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     notes = json.loads((output_dir / "notes" / "notes.json").read_text(encoding="utf-8"))
     assert notes["slide_count"] == 2
     assert [slide["page"] for slide in notes["slides"]] == [1, 3]
+
+    # Ensure we didn't generate slide images for excluded pages.
+    slides_dir = output_dir / "slides"
+    assert (slides_dir / "002.png").exists() is False
 
 
 def test_extract_command_openxml_fallback_on_linux(tmp_path, monkeypatch) -> None:
@@ -411,6 +431,27 @@ def test_apply_png_sequence_to_slides_copies_and_pads(tmp_path) -> None:
     assert out[2]["raw_notes"] == "n3"
 
 
+def test_apply_png_sequence_to_slides_respects_selected_pages(tmp_path) -> None:
+    slides_dir = tmp_path / "slides"
+    slides_dir.mkdir()
+    png_a = tmp_path / "a.png"
+    png_b = tmp_path / "b.png"
+    png_c = tmp_path / "c.png"
+    png_a.write_bytes(b"img1")
+    png_b.write_bytes(b"img2")
+    png_c.write_bytes(b"img3")
+    meta = [
+        {"page": 1, "title": "T1", "raw_notes": "n1"},
+        {"page": 2, "title": "T2", "raw_notes": "n2"},
+        {"page": 3, "title": "T3", "raw_notes": "n3"},
+    ]
+    out = _apply_png_sequence_to_slides(meta, [png_a, png_b, png_c], slides_dir, selected_pages={1, 3})
+    assert [row["page"] for row in out] == [1, 3]
+    assert (slides_dir / "001.png").exists()
+    assert not (slides_dir / "002.png").exists()
+    assert (slides_dir / "003.png").exists()
+
+
 def test_notes_body_placeholder_filter() -> None:
     class PlaceholderFormat:
         def __init__(self, placeholder_type):
@@ -442,12 +483,19 @@ def test_tts_provider_selection() -> None:
     edge_provider = _create_provider(provider_name="edge", voice_id="")
     assert isinstance(edge_provider, EdgeTTSProvider)
     assert edge_provider.voice_id == "zh-CN-XiaoxiaoNeural"
+    assert edge_provider.tts_rate == 1.0
+    minimax_cn = _create_provider(provider_name="minimax_cn", voice_id="")
+    assert minimax_cn.voice_id
+    assert minimax_cn.tts_rate == 1.0
+    minimax_gl = _create_provider(provider_name="minimax_global", voice_id="")
+    assert minimax_gl.voice_id
+    assert minimax_gl.tts_rate == 1.0
 
 
 def test_voices_command_returns_success(monkeypatch) -> None:
     monkeypatch.setattr(
         "note2video.cli.main.list_available_voices",
-        lambda provider_name, keyword: [
+        lambda provider_name, keyword, minimax_base_url=None: [
             {
                 "provider": provider_name,
                 "name": "zh-CN-XiaoxiaoNeural",
