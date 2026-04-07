@@ -5,10 +5,23 @@ import sys
 import tempfile
 import traceback
 import faulthandler
+from datetime import datetime
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any
+
+from note2video.publish import (
+    PublishPayload,
+    check_web_auth_status,
+    dump_publish_log,
+    login_with_browser,
+    merge_description_and_topics,
+    normalize_topics,
+    platform_upload_url,
+    profile_root_from_config,
+    publish_with_browser,
+)
 
 PREVIEW_SAMPLE_TEXT = "你好，这是一段音色试听。"
 
@@ -1824,20 +1837,80 @@ def _build_ui(QtWidgets, QtCore):
                 self.publish_result_table.setItem(row, col, self._QtWidgets.QTableWidgetItem(value))
             self.publish_result_table.resizeColumnsToContents()
 
+        def _profile_root_for_publish(self) -> Path:
+            from note2video.user_config import load_user_config, normalize_user_config
+
+            cfg = normalize_user_config(load_user_config())
+            return profile_root_from_config(cfg)
+
+        def _append_publish_log_to_disk(
+            self,
+            *,
+            payload: dict[str, Any],
+            result: dict[str, Any] | None = None,
+            error: str | None = None,
+        ) -> None:
+            out_dir = Path(self.out_edit.text().strip().strip('"') or "dist")
+            log_path = out_dir / "logs" / "publish.log"
+            record = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "payload": payload,
+                "result": result or {},
+                "error": error or "",
+            }
+            dump_publish_log(log_path, record)
+
         def _publish_login(self) -> None:
+            QtWidgets = self._QtWidgets
             platform = str(self.publish_platform_combo.currentData() or "douyin")
             method = str(self.publish_method_combo.currentData() or "web")
-            self.publish_auth_status_value.setText("已登录（模拟）")
-            self._append_publish_log(f"[auth] 平台={platform}, 方式={method}，请在后续接入真实浏览器自动化登录。")
+            if method != "web":
+                QtWidgets.QMessageBox.information(self, "发布登录", "当前仅支持 web 方式登录。")
+                return
+            self._append_publish_log(f"[auth] 正在打开浏览器登录：平台={platform}, 方式={method}")
+            try:
+                result = login_with_browser(
+                    platform=platform,
+                    profile_root=self._profile_root_for_publish(),
+                    wait_seconds=60,
+                )
+            except Exception as exc:
+                self.publish_auth_status_value.setText("登录失败")
+                self._append_publish_log(f"[auth] 登录失败：{exc}")
+                QtWidgets.QMessageBox.warning(self, "发布登录失败", str(exc))
+                return
+
+            logged_in = bool(result.get("logged_in"))
+            self.publish_auth_status_value.setText("已登录" if logged_in else "未登录")
+            self._append_publish_log(
+                f"[auth] 登录流程完成：logged_in={logged_in}, url={result.get('url')}"
+            )
 
         def _publish_check_auth_status(self) -> None:
             platform = str(self.publish_platform_combo.currentData() or "douyin")
             method = str(self.publish_method_combo.currentData() or "web")
-            status = self.publish_auth_status_value.text().strip() or "未检查"
-            self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 当前状态={status}")
+            if method != "web":
+                self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 当前状态=未实现")
+                return
+            try:
+                result = check_web_auth_status(
+                    platform=platform,
+                    profile_root=self._profile_root_for_publish(),
+                    headless=True,
+                )
+            except Exception as exc:
+                self.publish_auth_status_value.setText("检查失败")
+                self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 失败：{exc}")
+                return
+
+            logged_in = bool(result.get("logged_in"))
+            status = "已登录" if logged_in else "未登录"
+            self.publish_auth_status_value.setText(status)
+            self._append_publish_log(
+                f"[auth-status] 平台={platform}, 方式={method}, 当前状态={status}, url={result.get('url')}"
+            )
 
         def _start_publish(self) -> None:
-            QtCore = self._QtCore
             QtWidgets = self._QtWidgets
             if self._pipeline_busy:
                 QtWidgets.QMessageBox.information(self, "发布", "正在执行 Extract/Build，请稍后再发布。")
@@ -1850,41 +1923,56 @@ def _build_ui(QtWidgets, QtCore):
                 QtWidgets.QMessageBox.warning(self, "发布参数错误", str(exc))
                 return
 
+            publish_payload = PublishPayload(
+                platform=str(payload["platform"]),
+                method=str(payload["method"]),
+                video_path=str(payload["video_path"]),
+                title=str(payload["title"]),
+                topics=str(payload["topics"]),
+                description=str(payload["description"]),
+                cover_path=str(payload["cover_path"]),
+                visibility=str(payload["visibility"]),
+                schedule_enabled=bool(payload["schedule_enabled"]),
+                schedule_time=str(payload["schedule_time"]),
+                dry_run=bool(payload["dry_run"]),
+                auto_confirm=bool(payload["auto_confirm"]),
+            )
+
             self._publish_last_payload = payload
             self.publish_log.clear()
-            self._append_publish_log("开始发布任务（当前为 UI 骨架流程）…")
-            self._append_publish_log(f"platform={payload['platform']}, method={payload['method']}, video={payload['video_path']}")
+            self._append_publish_log("开始发布任务（web 自动化）…")
+            self._append_publish_log(
+                f"platform={payload['platform']}, method={payload['method']}, video={payload['video_path']}"
+            )
             self._publish_busy = True
             self._set_publish_running(True)
             self.publish_progress.setValue(0)
             self.publish_progress.setFormat("进度：准备中 (0/5)")
+            stage_map = {
+                "open_page": ("打开发布页面", 1),
+                "check_auth": ("检查登录状态", 1),
+                "upload_video": ("上传视频文件", 2),
+                "fill_form": ("填写发布信息", 3),
+                "confirm_publish": ("等待发布确认", 4),
+                "done": ("完成", 5),
+            }
 
-            steps = [
-                ("检查登录状态", 1),
-                ("上传视频文件", 2),
-                ("填写发布信息", 3),
-                ("等待发布确认", 4),
-                ("完成", 5),
-            ]
-            if payload.get("dry_run"):
-                steps[-1] = ("完成（dry-run，未点击发布）", 5)
+            def _stage_callback(name: str) -> None:
+                label, value = stage_map.get(name, (name, self.publish_progress.value()))
+                self._append_publish_log(f"阶段：{label}")
+                self.publish_progress.setValue(value)
+                self.publish_progress.setFormat(f"进度：{label} ({value}/5)")
 
-            timer = QtCore.QTimer(self)
-            timer.setInterval(320)
-            self._publish_timer = timer
-            cursor = {"i": 0}
-
-            def _finish(status: str, note: str) -> None:
-                if timer.isActive():
-                    timer.stop()
-                self._publish_timer = None
-                self._publish_busy = False
-                self._set_publish_running(False)
-                publish_id = (
-                    f"stub-{QtCore.QDateTime.currentDateTime().toString('yyyyMMddHHmmss')}"
-                    if status == "ok"
-                    else ""
+            try:
+                result = publish_with_browser(
+                    publish_payload,
+                    profile_root=self._profile_root_for_publish(),
+                    headless=False,
+                    stage_callback=_stage_callback,
                 )
+                status = str(result.get("status") or "ok")
+                note = str(result.get("note") or "")
+                publish_id = str(result.get("publish_id") or "")
                 self._append_publish_result_row(
                     platform=str(payload["platform"]),
                     title=str(payload["title"]),
@@ -1893,47 +1981,46 @@ def _build_ui(QtWidgets, QtCore):
                     note=note,
                 )
                 self._append_publish_log(f"发布流程结束：{status}，{note}")
-                self.publish_progress.setFormat(f"进度：{note}")
-
-            def _tick() -> None:
-                i = cursor["i"]
-                if i >= len(steps):
-                    done_note = "dry-run 完成" if payload.get("dry_run") else "发布任务已提交（骨架模拟）"
-                    _finish("ok", done_note)
-                    return
-                label, value = steps[i]
-                self._append_publish_log(f"阶段：{label}")
-                self.publish_progress.setValue(value)
-                self.publish_progress.setFormat(f"进度：{label} ({value}/5)")
-                cursor["i"] = i + 1
-
-            timer.timeout.connect(_tick)
-            timer.start()
-            _tick()
+                self.publish_progress.setValue(5)
+                self.publish_progress.setFormat(f"进度：{note or '完成'}")
+                self._append_publish_log_to_disk(payload=payload, result=result)
+            except Exception as exc:
+                err = str(exc)
+                self._append_publish_result_row(
+                    platform=str(payload["platform"]),
+                    title=str(payload["title"]),
+                    status="error",
+                    publish_id="",
+                    note=err,
+                )
+                self._append_publish_log(f"发布流程失败：{err}")
+                self.publish_progress.setFormat("进度：失败")
+                self._append_publish_log_to_disk(payload=payload, error=err)
+                QtWidgets.QMessageBox.warning(self, "发布失败", err)
+            finally:
+                self._publish_busy = False
+                self._set_publish_running(False)
+                self._publish_timer = None
 
         def _stop_publish(self) -> None:
-            if not self._publish_busy:
-                return
-            if self._publish_timer is not None:
-                try:
-                    self._publish_timer.stop()
-                except Exception:
-                    pass
-                self._publish_timer = None
-            self._publish_busy = False
-            self._set_publish_running(False)
-            self._append_publish_log("已停止当前发布任务（best-effort）。")
-            self.publish_progress.setFormat("已停止")
+            # Browser-based publish currently runs synchronously; we only update UI hint here.
+            if self._publish_busy:
+                self._append_publish_log("停止请求已记录：请关闭浏览器页面以终止当前步骤。")
+                self.publish_progress.setFormat("停止请求已记录")
+            else:
+                self._append_publish_log("当前没有进行中的发布任务。")
 
         def _publish_check_last_status(self) -> None:
             if self._publish_last_payload is None:
                 self._append_publish_log("暂无发布任务记录。")
                 return
             payload = self._publish_last_payload
+            upload_url = platform_upload_url(str(payload.get("platform") or "douyin"))
             self._append_publish_log(
                 "[status] 最近一次任务："
                 + f"platform={payload.get('platform')}, title={payload.get('title')}, method={payload.get('method')}"
             )
+            self._append_publish_log(f"[status] 入口地址：{upload_url}")
 
         def _publish_retry_last(self) -> None:
             if self._publish_last_payload is None:
