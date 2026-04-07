@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from note2video.gui.app import JobConfig, _run_extract_or_build
+from note2video.app.pipeline_service import BuildRequest
+from note2video.gui.app import JobConfig, _build_request_from_job_config, _run_extract_or_build
 
 
 def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
@@ -78,3 +79,69 @@ def test_run_build_mode_delegates_to_build_service(monkeypatch, tmp_path) -> Non
     assert "细节：segments=12, slides=5" in logs
     assert "细节：subtitles_burned=True, mixed_audio=True" in logs
     assert "输出视频：video/output.mp4" in logs
+
+
+def test_build_request_mapping_from_job_config(tmp_path) -> None:
+    cfg = JobConfig(
+        mode="build",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=tmp_path / "dist",
+        pages="1-3",
+        tts_provider="edge",
+        voice_id="zh-CN-XiaoxiaoNeural",
+        tts_rate=1.25,
+        subtitle_highlight_mode="word",
+        subtitle_highlight_color="&H00FFFF&",
+        subtitle_fade_in_ms=90,
+        subtitle_fade_out_ms=130,
+        subtitle_scale_from=98,
+        subtitle_scale_to=106,
+        subtitle_outline=2,
+        subtitle_shadow=1,
+        subtitle_font="Microsoft YaHei",
+        subtitle_size=38,
+        bgm_path="bgm.mp3",
+        bgm_volume=0.2,
+        narration_volume=0.95,
+        bgm_fade_in_s=0.5,
+        bgm_fade_out_s=1.0,
+    )
+
+    req = _build_request_from_job_config(cfg)
+
+    assert isinstance(req, BuildRequest)
+    assert req.input_file.endswith("demo.pptx")
+    assert req.out_dir.endswith("dist")
+    assert req.pages == "1-3"
+    assert req.tts_provider == "edge"
+    assert req.voice_id == "zh-CN-XiaoxiaoNeural"
+    assert req.tts_rate == 1.25
+    assert req.subtitle_highlight_mode == "word"
+    assert req.subtitle_fade_in_ms == 90
+    assert req.subtitle_fade_out_ms == 130
+    assert req.subtitle_scale_from == 98
+    assert req.subtitle_scale_to == 106
+    assert req.subtitle_outline == 2
+    assert req.subtitle_shadow == 1
+    assert req.subtitle_font == "Microsoft YaHei"
+    assert req.subtitle_size == 38
+    assert req.bgm_path == "bgm.mp3"
+    assert req.bgm_volume == 0.2
+    assert req.narration_volume == 0.95
+    assert req.bgm_fade_in_s == 0.5
+    assert req.bgm_fade_out_s == 1.0
+
+
+def test_run_pipeline_with_log_returns_error_and_trace_on_failure(monkeypatch, tmp_path) -> None:
+    from note2video.gui.app import _run_pipeline_with_log
+
+    logs: list[str] = []
+
+    def fake_extract(_request):
+        raise RuntimeError("extract failed for test")
+
+    monkeypatch.setattr("note2video.gui.app.run_extract_pipeline", fake_extract)
+    exit_code = _run_pipeline_with_log(_make_job_config(tmp_path, mode="extract"), logs.append)
+
+    assert exit_code == 1
+    assert any("RuntimeError: extract failed for test" in line for line in logs)

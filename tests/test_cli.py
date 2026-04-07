@@ -520,7 +520,9 @@ def test_convert_audio_to_wav_invokes_ffmpeg(tmp_path, monkeypatch) -> None:
         returncode = 0
         stderr = ""
 
-    def fake_run(command, capture_output, text):
+    def fake_run(command, capture_output, text, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
         output_file.write_bytes(b"RIFF")
         return Result()
 

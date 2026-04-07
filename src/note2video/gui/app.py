@@ -386,7 +386,33 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
         emit_log("完成：extract")
         return 0
 
-    build_request = BuildRequest(
+    build_request = _build_request_from_job_config(config)
+    build_result = run_build_pipeline(build_request)
+
+    emit_log("阶段：voice")
+    emit_log(
+        "细节："
+        + f"provider={build_result.get('voice_provider')}, "
+        + f"voice={build_request.voice_id or 'default'}, "
+        + f"tts_rate={build_request.tts_rate}"
+    )
+
+    emit_log("阶段：subtitle")
+    emit_log(f"细节：segments={build_result.get('segment_count')}, slides={build_result.get('slide_count')}")
+
+    emit_log("阶段：render")
+    emit_log(
+        f"细节：subtitles_burned={build_result.get('subtitles_burned')}, "
+        + f"mixed_audio={bool(build_result.get('mixed_audio'))}"
+    )
+    emit_log(f"输出视频：{build_result.get('artifacts', {}).get('video')}")
+
+    emit_log("完成：build")
+    return 0
+
+
+def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
+    return BuildRequest(
         input_file=str(config.pptx_path),
         out_dir=str(config.out_dir),
         pages=config.pages,
@@ -410,28 +436,6 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
         subtitle_font=config.subtitle_font,
         subtitle_size=config.subtitle_size,
     )
-    build_result = run_build_pipeline(build_request)
-
-    emit_log("阶段：voice")
-    emit_log(
-        "细节："
-        + f"provider={build_result.get('voice_provider')}, "
-        + f"voice={build_request.voice_id or 'default'}, "
-        + f"tts_rate={build_request.tts_rate}"
-    )
-
-    emit_log("阶段：subtitle")
-    emit_log(f"细节：segments={build_result.get('segment_count')}, slides={build_result.get('slide_count')}")
-
-    emit_log("阶段：render")
-    emit_log(
-        f"细节：subtitles_burned={build_result.get('subtitles_burned')}, "
-        + f"mixed_audio={bool(build_result.get('mixed_audio'))}"
-    )
-    emit_log(f"输出视频：{build_result.get('artifacts', {}).get('video')}")
-
-    emit_log("完成：build")
-    return 0
 
 
 def _build_worker(QtCore, config: JobConfig):
