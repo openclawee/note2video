@@ -33,7 +33,7 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
 
     def fake_render(project_dir, output_path=None, **kwargs):
         calls.append(("render", project_dir, output_path, kwargs.get("subtitle_highlight_mode")))
-        return {"video": "video/output.mp4", "subtitles_burned": True}
+        return {"video": "video/output.mp4", "subtitles_burned": True, "mixed_audio": "audio/mixed.wav"}
 
     req = BuildRequest(
         input_file=str(tmp_path / "demo.pptx"),
@@ -56,6 +56,22 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
     assert calls[1][0] == "voice"
     assert calls[2][0] == "subtitle"
     assert calls[3][0] == "render"
+
+
+def test_build_includes_mixed_audio_flag(tmp_path) -> None:
+    req = BuildRequest(input_file="in.pptx", out_dir=str(tmp_path / "dist"))
+    result = run_build_pipeline(
+        req,
+        extract_project_fn=lambda *args, **kwargs: SimpleNamespace(slide_count=1),
+        generate_voice_assets_fn=lambda *args, **kwargs: {"provider": "pyttsx3"},
+        generate_subtitles_fn=lambda *args, **kwargs: {"segment_count": 1},
+        render_video_fn=lambda *args, **kwargs: {
+            "video": "video/output.mp4",
+            "subtitles_burned": True,
+            "mixed_audio": "audio/mixed.wav",
+        },
+    )
+    assert result["mixed_audio"] is True
 
 
 def test_extract_delegates(monkeypatch, tmp_path) -> None:

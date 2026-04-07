@@ -59,6 +59,7 @@ def test_run_build_mode_delegates_to_build_service(monkeypatch, tmp_path) -> Non
             "segment_count": 12,
             "slide_count": 5,
             "subtitles_burned": True,
+            "mixed_audio": "audio/mixed.wav",
             "artifacts": {"video": "video/output.mp4"},
         }
 
@@ -75,4 +76,5 @@ def test_run_build_mode_delegates_to_build_service(monkeypatch, tmp_path) -> Non
     assert "阶段：voice" in logs
     assert "细节：provider=pyttsx3, voice=default, tts_rate=1.0" in logs
     assert "细节：segments=12, slides=5" in logs
+    assert "细节：subtitles_burned=True, mixed_audio=True" in logs
     assert "输出视频：video/output.mp4" in logs

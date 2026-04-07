@@ -424,7 +424,10 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
     emit_log(f"细节：segments={build_result.get('segment_count')}, slides={build_result.get('slide_count')}")
 
     emit_log("阶段：render")
-    emit_log(f"细节：subtitles_burned={build_result.get('subtitles_burned')}, mixed_audio=False")
+    emit_log(
+        f"细节：subtitles_burned={build_result.get('subtitles_burned')}, "
+        + f"mixed_audio={bool(build_result.get('mixed_audio'))}"
+    )
     emit_log(f"输出视频：{build_result.get('artifacts', {}).get('video')}")
 
     emit_log("完成：build")

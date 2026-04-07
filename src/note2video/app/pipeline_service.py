@@ -203,6 +203,7 @@ def run_build_pipeline(
         "segment_count": int(subtitle_result["segment_count"]),
         "voice_provider": str(voice_result["provider"]),
         "subtitles_burned": bool(render_result["subtitles_burned"]),
+        "mixed_audio": bool(render_result.get("mixed_audio")),
     }
 
 
