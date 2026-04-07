@@ -1,53 +1,53 @@
-# 项目历史归档
+# Project history archive
 
-## 文档目的
+## Purpose
 
-这份文档用于归档 `Note2Video / 备注成片` 项目的关键背景、设计共识、实现进展和后续计划。
+This document archives key background, design decisions, implementation progress, and next steps for the `Note2Video` project.
 
-它的目标不是替代详细设计文档，而是作为一个可迁移、可快速接手的项目上下文入口。即使后续修改本地目录名、迁移到新电脑，或者 Cursor 工作区历史发生变化，也可以依靠这份文档快速恢复上下文。
+It is not meant to replace detailed design docs. Instead, it serves as a portable “project context entry point” so someone can quickly pick up the project even if local directory names change, the machine changes, or IDE workspace history is lost.
 
-## 项目概览
+## Project overview
 
-- 项目名：`Note2Video`
-- 中文名：`备注成片`
-- 当前形态：开源、免费、`CLI-first`
-- 核心目标：把 PowerPoint 备注自动转换为配音、字幕和讲解视频
+- Project name: `Note2Video`
+- Chinese name: `Beizhu Chengpian`
+- Current form: open-source, free, **CLI-first**
+- Core goal: automatically turn PowerPoint speaker notes into narrated videos (voice-over + subtitles)
 
-项目的基本定位已经记录在：
+The high-level positioning is recorded in:
 
 - `docs/decisions/001-product-positioning.md`
 - `docs/decisions/002-cli-first-strategy.md`
 - `docs/decisions/003-mvp-scope.md`
 
-## 项目起点
+## Starting point
 
-这个项目最初不是作为一个普通本地工具来思考的，而是从“做成可复用 skill / 智能体工具”的方向出发。
+The project originally started from the idea of a reusable “skill / agent tool”, not just a local app.
 
-逐步收敛后，确定了以下产品判断：
+After narrowing down, the following product judgments were made:
 
-- 与其先做 UI、插件或编辑器，不如先做一个可自动化、可调试、可复用的 CLI。
-- 与其直接操作剪映等编辑器，不如先把从 `pptx` 到 `mp4` 的核心流水线打通。
-- 项目的核心竞争力不在“特效编辑”，而在“把已有 PPT 内容资产高效变成讲解视频”。
-- 未来如果封装成 skill，应该直接复用 CLI，而不是重写一套逻辑。
+- Build an automatable, debuggable, reusable CLI before UI/add-ins/editors.
+- Instead of controlling editors like CapCut directly, first make the core `pptx` → `mp4` pipeline solid.
+- The competitive advantage is not “effects editing”, but efficiently turning existing PPT assets into narrated videos.
+- If packaged as a skill in the future, it should reuse the CLI rather than re-implementing logic.
 
-## 已确定的产品方向
+## Confirmed product direction
 
-### 主要价值
+### Main value
 
-- 复用现有 PPT 与备注内容
-- 自动完成导图、提取备注、生成脚本、配音、字幕和视频
-- 让整个流程可以脚本化、可重复执行、可被智能体调用
+- Reuse existing PPT + notes content
+- Automate slide export, notes extraction, script generation, voice-over, subtitles, and video rendering
+- Make the whole workflow scriptable, repeatable, and agent-callable
 
-### 明确不做的事情
+### Explicit non-goals
 
-- 不做完整视频编辑器
-- 不与剪映、CapCut 直接竞争编辑能力
-- 不以复杂动效或多角色配音为第一优先级
-- 第一阶段不做 PowerPoint 插件和 Web SaaS
+- A full video editor
+- Competing directly with CapCut on editing capabilities
+- Complex motion effects or multi-speaker dubbing as the first priority
+- PowerPoint add-ins and Web SaaS in phase 1
 
-## 当前 CLI 范围
+## Current CLI scope
 
-当前主命令和子命令如下：
+Main command and subcommands:
 
 - `note2video build`
 - `note2video extract`
@@ -56,34 +56,34 @@
 - `note2video subtitle`
 - `note2video render`
 
-核心原则：
+Core principles:
 
-- 一条命令可跑完整流程
-- 每一步也可以单独执行
-- 中间产物必须可落盘、可检查、可调试
+- One command can run the full pipeline
+- Each step can also be run independently
+- Intermediate artifacts must be written to disk and be inspectable/debuggable
 
-## 当前实现状态
+## Current implementation status
 
-截至目前，项目已经具备从 `pptx` 到 `mp4` 的最小闭环。
+The project already provides a minimal end-to-end loop from `.pptx` to `.mp4`.
 
-### 已完成能力
+### Completed capabilities
 
-- Python 项目骨架与 CLI 入口
-- `extract` 真实实现
-- 通过 PowerPoint COM 导出页面图片
-- 提取每页备注、生成 `raw_notes`、`speaker_notes`、`script`
-- 输出结构化 JSON 与逐页 / 汇总 `.txt` 文件
-- `voice` 配音流程
-- 支持 `pyttsx3` 与 `edge-tts` 两个 TTS provider
-- `voices` 命令用于列出可用音色
-- `subtitle` 生成 `srt` 和 `json`
-- `render` 使用 ffmpeg 合成最终视频
-- `build` 串联完整流程
-- 单元测试覆盖核心命令主路径
+- Python project scaffold and CLI entry point
+- A real `extract` implementation
+- Export slide images via PowerPoint COM
+- Extract per-slide notes and produce `raw_notes`, `speaker_notes`, and `script`
+- Output structured JSON plus per-slide and aggregated `.txt` files
+- Voice pipeline (`voice`)
+- Two TTS providers: `pyttsx3` and `edge-tts`
+- `voices` command to list available voices
+- Subtitle generation (`subtitle`) producing `srt` and `json`
+- Video rendering (`render`) via ffmpeg
+- Full orchestration via `build`
+- Unit tests covering the main CLI paths
 
-### 当前输出结构
+### Current output structure
 
-典型产物包括：
+Typical artifacts include:
 
 - `manifest.json`
 - `slides/*.png`
@@ -101,190 +101,190 @@
 - `subtitles/subtitles.json`
 - `video/output.mp4`
 
-## 关键设计演进
+## Key design evolution
 
-### 1. 文本分层
+### 1. Text layering
 
-项目中间文本现在分为三层：
+Intermediate text is currently split into three layers:
 
-- `raw_notes`：从 PPT 备注页中直接提取的原始文本
-- `speaker_notes`：做过基础清洗后的可读备注
-- `script`：进一步整理成更适合口播与字幕切分的脚本
+- `raw_notes`: raw text extracted from PPT notes pages
+- `speaker_notes`: lightly cleaned, readable notes
+- `script`: further transformed for narration and subtitle splitting
 
-这样做的原因是：
+Why:
 
-- 方便排查提取问题
-- 方便手工审阅和复制
-- 为后续更高级的脚本清洗和配音优化留出空间
+- Easier to debug extraction issues
+- Easier to review/copy manually
+- Leaves space for future script cleaning and TTS optimization
 
-### 2. 配音 provider 可插拔
+### 2. Pluggable TTS providers
 
-TTS 采用 provider 结构，而不是把逻辑写死在 CLI 里。
+TTS is implemented as a provider interface instead of hardcoding logic into the CLI.
 
-当前已接入：
+Currently integrated:
 
-- `pyttsx3`：本地可用，便于离线验证
-- `edge-tts`：在线能力更强，音质更适合公开演示
+- `pyttsx3`: local, useful for offline validation
+- `edge-tts`: higher quality, better for public demos
 
-### 3. 字幕时间轴从“估算”升级到“真实句级时长”
+### 3. Subtitle timing upgraded from “estimated” to “real per-sentence durations”
 
-项目一开始的字幕时间分配，是按句子长度比例估算的。
+Early subtitle timing was allocated by sentence-length ratios.
 
-后续为提升字幕同步质量，已经升级为：
+To improve sync quality, it was upgraded to:
 
-- `voice` 按 `script` 逐句生成音频
-- 再拼成整页音频与整片音频
-- 同时写出 `audio/timings.json`
-- `subtitle` 优先读取这份真实句级时间轴
+- `voice` generates audio per sentence based on `script`
+- Merge into per-slide and full merged audio
+- Write `audio/timings.json`
+- `subtitle` prefers this real per-sentence timeline
 
-这意味着字幕不再单纯按文本长度分配时间，而是依据每句 TTS 的真实时长来生成。
+This means subtitle timing is not merely text-length-based, but derived from real TTS durations.
 
-## 已处理的重要问题
+## Important issues already addressed
 
-### 1. pytest 无法导入项目模块
+### 1. pytest could not import project modules
 
-问题：
+Problem:
 
-- `pytest` 运行时找不到 `note2video`
+- `pytest` could not find `note2video`
 
-处理：
+Fix:
 
-- 在 `pyproject.toml` 中为 pytest 增加 `src` 路径
+- Add `src` to pytest `pythonpath` in `pyproject.toml`
 
-### 2. PowerPoint 隐藏窗口兼容性问题
+### 2. PowerPoint hidden window compatibility
 
-问题：
+Problem:
 
-- 某些 PowerPoint 版本对 `app.Visible = 0` 兼容性差
+- Some PowerPoint versions behave poorly when `app.Visible = 0`
 
-处理：
+Fix:
 
-- 改为显式可见模式，提高兼容性
+- Use visible mode explicitly for better compatibility
 
-### 3. `Slide.Export` 使用相对路径不稳定
+### 3. `Slide.Export` relative path instability
 
-问题：
+Problem:
 
-- PowerPoint COM 在导出图片时对相对路径不稳定
+- PowerPoint COM export is unreliable with relative paths
 
-处理：
+Fix:
 
-- 改为传入绝对路径
+- Always pass absolute paths
 
-### 4. 备注提取误把占位内容和页码当备注
+### 4. Notes extraction mistakenly captured placeholders/page numbers
 
-问题：
+Problem:
 
-- 没有真实备注时，仍然可能提取出类似 `1 2 3` 之类无效文本
+- When there are no real notes, extraction may still return meaningless text like `1 2 3`
 
-处理：
+Fix:
 
-- 收紧备注区块识别逻辑
-- 区分备注占位符和真实备注主体
-- 增加文本清洗与过滤
+- Tighten notes block detection
+- Distinguish placeholders from real notes content
+- Add cleanup and filtering
 
-### 5. `raw_notes` 与 `script` 内容过于相近
+### 5. `raw_notes` and `script` were too similar
 
-问题：
+Problem:
 
-- 初期实现中，脚本层没有体现出与原始备注层的差异
+- Early script layer did not differ meaningfully from raw notes
 
-处理：
+Fix:
 
-- 增加 `_to_speaker_notes` 与 `_to_script` 两层转换
-- 让 `script` 更接近口播和字幕使用场景
+- Add `_to_speaker_notes` and `_to_script` conversions
+- Make `script` closer to narration/subtitle usage
 
-### 6. 字幕只显示第一页的第一句或每页只显示第一句
+### 6. Subtitles only showed the first sentence (or only the first sentence per slide)
 
-问题：
+Problem:
 
-- 虽然 SRT 文件中有多句字幕，但最终视频里字幕更新异常
+- The SRT had multiple lines, but the burned subtitles did not update correctly
 
-原因：
+Root cause:
 
-- 图片拼接视频时使用了不利于字幕逐句更新的轨道生成方式
+- The initial slide-video track generation method was unfriendly for per-sentence subtitle updates
 
-处理：
+Fix:
 
-- 在渲染阶段先生成固定帧率视频，再进行字幕烧录
+- Generate a fixed-fps base video first, then burn subtitles
 
-### 7. Edge TTS 音频格式不统一
+### 7. Edge TTS output format inconsistency
 
-问题：
+Problem:
 
-- `edge-tts` 输出结果与后续 WAV 处理链不完全兼容
+- `edge-tts` output was not fully compatible with the WAV processing chain
 
-处理：
+Fix:
 
-- 先输出临时音频，再统一转换为标准 WAV
+- Write temporary audio, then convert into a standard WAV format
 
-## 当前验证状态
+## Current verification status
 
-目前已完成以下验证：
+Verified so far:
 
-- `tests/test_cli.py` 已通过
-- `build` 完整链路已可在样例 `pptx` 上跑通
-- 实际产物中已生成：
+- `tests/test_cli.py` passes
+- The full `build` pipeline runs on a sample `.pptx`
+- Real outputs include:
   - `audio/timings.json`
   - `subtitles/subtitles.srt`
   - `video/output.mp4`
-- `manifest.json` 已能正确记录：
+- `manifest.json` correctly records:
   - `merged_audio`
   - `timings`
   - `subtitle`
   - `video`
   - `video_subtitles_burned`
 
-## 当前最值得继续做的方向
+## Highest-value next directions
 
-### 方向 1：继续提升脚本清洗质量
+### Direction 1: improve script cleaning
 
-候选优化包括：
+Candidate improvements:
 
-- 数字读法处理
-- 英文缩写处理
-- 括号内容清洗
-- 长句进一步切分
-- 更贴近中文口播节奏的断句
+- Number normalization / pronunciation
+- Handling of English abbreviations
+- Bracket content cleanup
+- Further splitting of long sentences
+- Better segmentation for spoken Chinese rhythm
 
-### 方向 2：继续优化字幕与口播节奏
+### Direction 2: improve subtitles and narration pacing
 
-在已有逐句 TTS 基础上，还可以继续做：
+With per-sentence TTS timing already available, further work can include:
 
-- 句间停顿控制
-- 最短字幕时长限制
-- 过短句自动合并
-- 过长句自动二次切分
-- 页内句间时间微调
+- Pause control between sentences
+- Minimum subtitle duration
+- Auto-merge very short sentences
+- Auto-split overly long sentences
+- In-slide timing micro-adjustments
 
-### 方向 3：为公开开源做准备
+### Direction 3: prepare for public open-sourcing
 
-在打算发布到 GitHub 前，建议继续补齐：
+Before publishing to GitHub, consider adding:
 
 - `.gitignore`
-- 初版开源仓库说明
-- 示例输入输出说明
-- 安装依赖与环境要求
-- 对 Windows / PowerPoint 依赖的明确说明
+- A first public README
+- Example inputs/outputs
+- Installation and environment requirements
+- Clear statements about Windows / PowerPoint dependencies
 
-## 迁移建议
+## Migration recommendations
 
-如果后续要改本地目录名、换电脑或迁移 Cursor 工作区，建议至少保留以下内容：
+If you rename directories, change machines, or move IDE workspaces, keep at least:
 
-- 本文档 `docs/project-history.md`
+- This document: `docs/project-history.md`
 - `README.md`
 - `docs/cli.md`
 - `docs/decisions/*.md`
 
-如果需要保留更完整的对话背景，可以把关键讨论继续沉淀为新的决策文档，而不要只依赖 IDE 内部聊天记录。
+If you need richer conversation context, capture key discussions as new decision docs rather than relying only on IDE chat history.
 
-## 后续维护建议
+## Maintenance recommendations
 
-以后每完成一个关键阶段，建议都更新本文档中的以下部分：
+After each major milestone, update these sections:
 
-- 当前实现状态
-- 已处理的重要问题
-- 当前验证状态
-- 当前最值得继续做的方向
+- Current implementation status
+- Important issues already addressed
+- Current verification status
+- Highest-value next directions
 
-这样项目历史就能持续沉淀，而不是散落在聊天记录里。
+This helps preserve project history over time instead of scattering it across chat logs.

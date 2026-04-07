@@ -1,58 +1,58 @@
-# 002 CLI 优先策略
+# 002 CLI-first strategy
 
-## 日期
+## Date
 
 2026-03-25
 
-## 状态
+## Status
 
-已采纳
+Accepted
 
-## 决策
+## Decision
 
-`Note2Video` 的第一阶段交付形式确定为 CLI，而不是桌面应用、PowerPoint 插件或 Web 产品。
+The first-stage deliverable of `Note2Video` is a CLI (not a desktop app, PowerPoint add-in, or web product).
 
-命令名确定为：
+The command name is:
 
 ```bash
 note2video
 ```
 
-## 原因
+## Rationale
 
-现阶段采用 CLI 最合适：
+A CLI is the best fit at this stage:
 
-- 最快验证端到端流程
-- 本地重复运行和调试更方便
-- 输入输出边界更清晰
-- 更容易封装成可复用 skill
-- 更适合开源项目的早期传播
+- Fastest way to validate the end-to-end pipeline
+- Easier to rerun locally and debug iteratively
+- Clearer input/output boundaries
+- Easier to wrap as a reusable skill
+- Better for early-stage adoption in an open-source project
 
-第一阶段真正要解决的问题不是 UI，而是先把核心流水线跑稳：
+The main problem to solve in phase 1 is not UI, but a stable core pipeline:
 
-- 解析 `pptx`
-- 导出页面图片与备注
-- 生成配音
-- 生成字幕
-- 渲染最终视频
+- Parse `.pptx`
+- Export slide images and notes
+- Generate voice-over
+- Generate subtitles
+- Render the final video
 
-## 备选方案
+## Alternatives considered
 
-### 先做桌面应用
+### Desktop app first
 
-暂不采用，因为会在核心能力尚未稳定前显著增加开发范围和 UI 成本。
+Not chosen: it significantly increases scope and UI cost before the core capabilities are stable.
 
-### 先做 PowerPoint 插件
+### PowerPoint add-in first
 
-暂不采用，因为运行时受宿主限制，不利于本地处理和后续 skill 封装。
+Not chosen: runtime constraints from the host app make local processing and skill packaging harder.
 
-### 先做 Web 应用
+### Web app first
 
-暂不采用，因为文件隐私、渲染兼容性和服务端处理成本都还不是当前最该解决的问题。
+Not chosen: file privacy, rendering compatibility, and server-side cost are not the most urgent problems right now.
 
-## 影响
+## Implications
 
-- 每个主要流水线步骤都应能独立调用
-- 输出结果应尽量稳定并持久化到磁盘
-- 日志与 JSON 摘要应该作为一等能力设计
-- 未来的桌面版或 skill 体验应复用同一套核心流水线
+- Each major pipeline step should be independently invokable
+- Outputs should be stable and persisted to disk
+- Logs and JSON summaries should be first-class features
+- Future desktop/skill experiences should reuse the same core pipeline

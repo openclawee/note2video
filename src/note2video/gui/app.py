@@ -4,6 +4,7 @@ import os
 import sys
 import tempfile
 import traceback
+import faulthandler
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -299,6 +300,7 @@ class JobConfig:
 
 def main(argv: list[str] | None = None) -> int:
     QtCore, QtWidgets = _require_pyside6()
+    faulthandler.enable()
 
     # Only pass the program path to Qt. Full sys.argv (e.g. `python -m ...`) can confuse Qt's
     # argument parser and has been observed to break the event loop on some Windows setups.
@@ -427,6 +429,13 @@ def _build_ui(QtWidgets):
             self._preview_thread: Any = None
             self._preview_worker: Any = None
             self._preview_temp_path: Path | None = None
+            self._preview_proc: Any = None
+            self._preview_timer: Any = None
+            self._preview_log_path: Path | None = None
+            self._preview_log_fh: Any = None
+            self._last_preview_path: Path | None = None
+            self._preview_web_view: Any = None
+            self._preview_web_available: bool = False
             self._pipeline_busy = False
 
             central = QtWidgets.QWidget(self)
@@ -607,6 +616,49 @@ def _build_ui(QtWidgets):
             self.progress.setFormat("就绪")
             right.addWidget(self.progress)
 
+            # --- Preview player (embedded browser) ---
+            preview_group = QtWidgets.QGroupBox("试听播放器（内嵌）")
+            preview_v = QtWidgets.QVBoxLayout(preview_group)
+            preview_hint = QtWidgets.QLabel(
+                "若系统默认播放器不稳定，可用内嵌浏览器播放（需要 QtWebEngine）。"
+            )
+            preview_hint.setWordWrap(True)
+            preview_hint.setStyleSheet("color: gray;")
+            preview_v.addWidget(preview_hint)
+
+            self.preview_open_btn = QtWidgets.QPushButton("在内嵌播放器中打开最近一次试听")
+            self.preview_open_btn.setEnabled(False)
+            preview_v.addWidget(self.preview_open_btn)
+
+            preview_actions = QtWidgets.QHBoxLayout()
+            self.preview_play_system_btn = QtWidgets.QPushButton("播放（系统默认）")
+            self.preview_reveal_btn = QtWidgets.QPushButton("定位文件")
+            self.preview_play_system_btn.setEnabled(False)
+            self.preview_reveal_btn.setEnabled(False)
+            preview_actions.addWidget(self.preview_play_system_btn)
+            preview_actions.addWidget(self.preview_reveal_btn)
+            preview_actions.addStretch(1)
+            preview_v.addLayout(preview_actions)
+
+            try:
+                from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
+
+                self._preview_web_view = QWebEngineView()
+                self._preview_web_available = True
+                self._preview_web_view.setMinimumHeight(120)
+                preview_v.addWidget(self._preview_web_view)
+            except Exception:
+                self._preview_web_view = None
+                self._preview_web_available = False
+                missing = QtWidgets.QLabel(
+                    "当前环境未安装/无法加载 QtWebEngine，内嵌播放不可用；仍可用系统播放器播放。"
+                )
+                missing.setWordWrap(True)
+                missing.setStyleSheet("color: gray;")
+                preview_v.addWidget(missing)
+
+            right.addWidget(preview_group)
+
             self.log = QtWidgets.QPlainTextEdit()
             self.log.setReadOnly(True)
             right.addWidget(self.log, 1)
@@ -623,6 +675,9 @@ def _build_ui(QtWidgets):
             self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
             self.voice_refresh_btn.clicked.connect(self._refresh_voice_list)
             self.voice_preview_btn.clicked.connect(self._preview_voice)
+            self.preview_open_btn.clicked.connect(self._open_last_preview_in_web)
+            self.preview_play_system_btn.clicked.connect(self._play_last_preview_system)
+            self.preview_reveal_btn.clicked.connect(self._reveal_last_preview)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
@@ -862,7 +917,7 @@ def _build_ui(QtWidgets):
         def _preview_voice(self) -> None:
             QtCore = self._QtCore
             QtWidgets = self._QtWidgets
-            if self._preview_thread is not None:
+            if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听正在进行中，请稍候…")
                 return
             if self._pipeline_busy or self._thread is not None:
@@ -883,137 +938,131 @@ def _build_ui(QtWidgets):
             os.close(fd)
             out_path = Path(raw_path)
 
-            class PreviewWorker(QtCore.QObject):
-                finished = QtCore.Signal(object)
-                failed = QtCore.Signal(str)
-
-                def __init__(
-                    self,
-                    *,
-                    provider_name: str,
-                    voice_id: str,
-                    tts_rate: float,
-                    text: str,
-                    out_path: Path,
-                ) -> None:
-                    super().__init__()
-                    self._provider_name = provider_name
-                    self._voice_id = voice_id
-                    self._tts_rate = tts_rate
-                    self._text = text
-                    self._out_path = out_path
-
-                @QtCore.Slot()
-                def run(self) -> None:
-                    try:
-                        # Run preview in a subprocess so GUI won't crash even if a backend DLL/codecs crashes.
-                        import subprocess
-
-                        cmd = [
-                            sys.executable,
-                            "-m",
-                            "note2video.tts.preview_worker",
-                            "--provider",
-                            self._provider_name,
-                            "--voice",
-                            self._voice_id,
-                            "--tts-rate",
-                            str(self._tts_rate),
-                            "--text",
-                            self._text,
-                            "--out",
-                            str(self._out_path),
-                        ]
-                        proc = subprocess.run(
-                            cmd,
-                            capture_output=True,
-                            text=True,
-                            encoding="utf-8",
-                            errors="replace",
-                        )
-                        if proc.returncode != 0:
-                            err = (proc.stderr or proc.stdout or "").strip() or f"exit_code={proc.returncode}"
-                            raise RuntimeError(err)
-                        self.finished.emit(
-                            {
-                                "path": str(self._out_path),
-                                "stdout": (proc.stdout or "").strip(),
-                                "stderr": (proc.stderr or "").strip(),
-                                "cmd": cmd,
-                            }
-                        )
-                    except BaseException as exc:
-                        self.failed.emit(f"{type(exc).__name__}: {exc}")
-
             self._preview_temp_path = out_path
             self.voice_preview_btn.setEnabled(False)
             self._append_log("正在生成试听音频…")
 
-            thread = QtCore.QThread()
-            worker = PreviewWorker(
-                provider_name=provider,
-                voice_id=voice_id,
-                tts_rate=rate,
-                text=PREVIEW_SAMPLE_TEXT,
-                out_path=out_path,
-            )
-            worker.moveToThread(thread)
-            self._preview_thread = thread
-            self._preview_worker = worker
+            # Run preview in a subprocess. Avoid QThread/Qt signals here: on some Windows setups
+            # PySide/Qt + threads can end up in native crashes (0xC0000409). We poll the child
+            # process state from the main thread via QTimer instead.
+            import subprocess
 
-            thread.started.connect(worker.run)
+            cmd = [
+                sys.executable,
+                "-m",
+                "note2video.tts.preview_worker",
+                "--provider",
+                provider,
+                "--voice",
+                voice_id,
+                "--tts-rate",
+                str(rate),
+                "--text",
+                PREVIEW_SAMPLE_TEXT,
+                "--out",
+                str(out_path),
+            ]
 
-            def _cleanup_thread() -> None:
-                thread.quit()
-                if not thread.wait(10_000):
-                    self._append_log("警告：试听线程未在 10 秒内结束。")
+            fd_log, raw_log_path = tempfile.mkstemp(suffix=".log", prefix="note2video_preview_")
+            os.close(fd_log)
+            log_path = Path(raw_log_path)
+            self._preview_log_path = log_path
+            try:
+                self._preview_log_fh = open(log_path, "wb")
+            except OSError:
+                self._preview_log_fh = None
 
-            def _ok(result_obj: object) -> None:
-                try:
-                    payload = dict(result_obj) if isinstance(result_obj, dict) else {}
-                except Exception:
-                    payload = {}
-                p = Path(str(payload.get("path") or ""))
-                _cleanup_thread()
-                self._preview_thread = None
-                self._preview_worker = None
+            creationflags = 0
+            if sys.platform == "win32":
+                creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+            try:
+                self._preview_proc = subprocess.Popen(
+                    cmd,
+                    stdout=(self._preview_log_fh if self._preview_log_fh is not None else subprocess.DEVNULL),
+                    stderr=(self._preview_log_fh if self._preview_log_fh is not None else subprocess.DEVNULL),
+                    creationflags=creationflags,
+                )
+            except Exception as exc:
+                if self._preview_log_fh is not None:
+                    try:
+                        self._preview_log_fh.close()
+                    except Exception:
+                        pass
+                self._preview_log_fh = None
+                self._preview_proc = None
+                self._preview_log_path = None
                 self.voice_preview_btn.setEnabled(True)
+                self._append_log(f"试听失败：无法启动子进程：{type(exc).__name__}: {exc}")
+                QtWidgets.QMessageBox.warning(self, "试听失败", f"无法启动试听子进程：{exc}")
+                return
+
+            self._append_log(f"cmd: {cmd}")
+            timer = QtCore.QTimer(self)
+            timer.setInterval(120)
+            self._preview_timer = timer
+
+            def _finish_preview() -> None:
+                proc = self._preview_proc
+                if proc is None:
+                    return
+                rc = proc.poll()
+                if rc is None:
+                    return
+
+                timer.stop()
+                self._preview_timer = None
+                self._preview_proc = None
+                self.voice_preview_btn.setEnabled(True)
+
+                if self._preview_log_fh is not None:
+                    try:
+                        self._preview_log_fh.close()
+                    except Exception:
+                        pass
+                self._preview_log_fh = None
+
+                log_text = ""
+                if self._preview_log_path and self._preview_log_path.exists():
+                    try:
+                        raw = self._preview_log_path.read_bytes()
+                        log_text = raw.decode("utf-8", errors="replace").strip()
+                    except Exception:
+                        log_text = ""
+
+                p = self._preview_temp_path
+                if rc != 0:
+                    self._append_log(f"试听子进程退出码：{rc}")
+                    if log_text:
+                        self._append_log("preview subprocess log:\n" + log_text)
+                    QtWidgets.QMessageBox.warning(self, "试听失败", f"试听子进程退出码：{rc}\n请查看下方日志。")
+                    return
+
                 if not p or not p.exists():
                     self._append_log("试听失败：未生成输出文件。")
-                    cmd = payload.get("cmd")
-                    if cmd:
-                        self._append_log(f"cmd: {cmd}")
-                    if payload.get("stdout"):
-                        self._append_log("stdout:\n" + str(payload.get("stdout")))
-                    if payload.get("stderr"):
-                        self._append_log("stderr:\n" + str(payload.get("stderr")))
+                    if log_text:
+                        self._append_log("preview subprocess log:\n" + log_text)
                     QtWidgets.QMessageBox.warning(self, "试听失败", "试听未生成输出音频文件，请查看下方日志。")
                     return
+
                 try:
                     size = p.stat().st_size
                 except OSError:
                     size = -1
                 self._append_log(f"试听音频已生成：{p}  ({size} bytes)")
-                QtCore.QTimer.singleShot(0, lambda pp=p: self._safe_play_preview(pp))
+                self._last_preview_path = p
+                self.preview_open_btn.setEnabled(bool(self._preview_web_available))
+                self.preview_play_system_btn.setEnabled(True)
+                self.preview_reveal_btn.setEnabled(True)
+                if self._preview_web_available and self._preview_web_view is not None:
+                    self._load_preview_in_web(p, autoplay=False)
+                    # Player is ready; user can hit play or "打开最近一次试听" to autoplay.
+                    self._append_log("内嵌播放器已加载试听文件，可在右侧播放器中播放。")
+                else:
+                    self._append_log("提示：QtWebEngine 不可用，可用右侧按钮用系统默认播放器播放。")
 
-            def _bad(msg: str) -> None:
-                _cleanup_thread()
-                self._preview_thread = None
-                self._preview_worker = None
-                self.voice_preview_btn.setEnabled(True)
-                if self._preview_temp_path and self._preview_temp_path.exists():
-                    try:
-                        self._preview_temp_path.unlink()
-                    except OSError:
-                        pass
-                self._preview_temp_path = None
-                self._append_log(f"试听失败：{msg}")
-                QtWidgets.QMessageBox.warning(self, "试听失败", msg)
-
-            qc = QtCore.Qt.ConnectionType.QueuedConnection
-            worker.finished.connect(_ok, qc)
-            worker.failed.connect(_bad, qc)
-            thread.start()
+            timer.timeout.connect(_finish_preview)
+            timer.start()
 
         def _safe_play_preview(self, path: Path) -> None:
             # Default to system player. QtMultimedia/QMediaPlayer has been observed to crash on
@@ -1025,18 +1074,46 @@ def _build_ui(QtWidgets):
                     self._play_preview_file(path)
                 except Exception:
                     self._append_log(traceback.format_exc())
-                    self._offer_open_preview_file(path)
+                    self._reveal_preview_file(path)
                     QtWidgets.QMessageBox.warning(
                         self,
                         "试听",
-                        "内置播放器播放失败，已改为用系统默认播放器打开试听文件（见日志）。",
+                        "内置播放器播放失败，已改为在资源管理器中定位试听文件（见日志）。",
                     )
                 return
 
-            self._offer_open_preview_file(path)
+            # Default: do NOT auto-open the file with a media player, because some file
+            # associations / codecs may crash the current process on Windows. Reveal it instead.
+            if mode in {"open", "system", "startfile"}:
+                self._open_preview_file(path)
+                return
+            self._reveal_preview_file(path)
 
-        def _offer_open_preview_file(self, path: Path) -> None:
-            """Fallback: open the generated WAV with the system default player."""
+        def _reveal_preview_file(self, path: Path) -> None:
+            """Reveal the generated WAV in file explorer (safer than auto-playing)."""
+            QtWidgets = self._QtWidgets
+            try:
+                if sys.platform == "win32":
+                    import subprocess
+
+                    subprocess.Popen(
+                        ["explorer.exe", "/select,", str(path)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    self._append_log("已在资源管理器中定位试听音频文件。")
+                    return
+                raise RuntimeError("Reveal is only implemented on Windows.")
+            except Exception as exc:
+                self._append_log(f"无法在资源管理器中定位试听文件：{exc}")
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "试听音频已生成",
+                    f"已生成试听文件：\n{path}\n\n当前环境无法自动播放，请手动打开该文件。",
+                )
+
+        def _open_preview_file(self, path: Path) -> None:
+            """Open the generated WAV with the system default player (may be unsafe on some setups)."""
             QtWidgets = self._QtWidgets
             try:
                 if sys.platform == "win32":
@@ -1064,7 +1141,7 @@ def _build_ui(QtWidgets):
                     "试听",
                     "当前环境无法加载 QtMultimedia，请确认已安装完整 PySide6（pip install -U PySide6）。",
                 )
-                self._offer_open_preview_file(path)
+                self._reveal_preview_file(path)
                 return
 
             if self._preview_audio_out is None:
@@ -1078,12 +1155,74 @@ def _build_ui(QtWidgets):
                 self._preview_audio_out.setVolume(1.0)
                 self._preview_player.play()
             except Exception as exc:
-                self._offer_open_preview_file(path)
+                self._reveal_preview_file(path)
                 raise RuntimeError(f"QMediaPlayer 播放失败：{exc}") from exc
             self._append_log("开始播放试听（请检查系统音量）。")
 
         def _append_log(self, text: str) -> None:
             self.log.appendPlainText(text.rstrip("\n"))
+
+        def _open_last_preview_in_web(self) -> None:
+            QtWidgets = self._QtWidgets
+            p = self._last_preview_path
+            if not p or not p.exists():
+                QtWidgets.QMessageBox.information(self, "试听", "还没有可播放的试听文件。")
+                return
+            if not self._preview_web_available or self._preview_web_view is None:
+                QtWidgets.QMessageBox.information(self, "试听", "内嵌浏览器播放不可用（缺少 QtWebEngine）。")
+                return
+            self._load_preview_in_web(p, autoplay=True)
+
+        def _play_last_preview_system(self) -> None:
+            QtWidgets = self._QtWidgets
+            p = self._last_preview_path
+            if not p or not p.exists():
+                QtWidgets.QMessageBox.information(self, "试听", "还没有可播放的试听文件。")
+                return
+            self._open_preview_file(p)
+
+        def _reveal_last_preview(self) -> None:
+            QtWidgets = self._QtWidgets
+            p = self._last_preview_path
+            if not p or not p.exists():
+                QtWidgets.QMessageBox.information(self, "试听", "还没有可播放的试听文件。")
+                return
+            self._reveal_preview_file(p)
+
+        def _load_preview_in_web(self, path: Path, *, autoplay: bool) -> None:
+            view = self._preview_web_view
+            if view is None:
+                return
+            try:
+                from PySide6.QtCore import QUrl
+                from PySide6.QtWebEngineCore import QWebEngineSettings  # type: ignore
+            except Exception:
+                return
+
+            # Make the HTML page same-origin with the WAV file directory so the <audio> element
+            # can read it reliably on Windows.
+            base_dir = path.parent.resolve()
+            base_url = QUrl.fromLocalFile(str(base_dir) + os.sep)
+            auto = " autoplay" if autoplay else ""
+            safe_path = str(path).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            safe_name = path.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;")
+            html = (
+                "<!doctype html><html><head><meta charset='utf-8'></head><body>"
+                "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#444;'>"
+                f"试听文件：{safe_path}"
+                "</div>"
+                f"<audio controls{auto} style='width:100%; margin-top:6px;' src='{safe_name}'></audio>"
+                "</body></html>"
+            )
+
+            try:
+                settings = view.settings()
+                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
+                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
+            except Exception:
+                pass
+
+            view.setHtml(html, base_url)
 
         def _pick_pptx(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1145,7 +1284,7 @@ def _build_ui(QtWidgets):
             self.locale_combo.setEnabled(not running)
             self.voice_combo.setEnabled(not running)
             self.voice_refresh_btn.setEnabled(not running)
-            self.voice_preview_btn.setEnabled(not running and self._preview_thread is None)
+            self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
             self.progress.setEnabled(True)
             if not running:
@@ -1178,7 +1317,7 @@ def _build_ui(QtWidgets):
             QtCore = self._QtCore
             QtWidgets = self._QtWidgets
 
-            if self._preview_thread is not None:
+            if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听进行中，请等待试听完成后再执行任务。")
                 return
 

@@ -1,26 +1,26 @@
-# CLI 设计草案
+# CLI design draft
 
-## 命令格式
+## Command format
 
 ```bash
 note2video <command> [options]
 ```
 
-## 设计原则
+## Design principles
 
-- 普通用户可以用一条命令跑完整流程
-- 开发阶段可以逐步执行，便于调试
-- 输出路径和结构尽量稳定，便于 skill 封装
-- JSON 输出优先面向自动化调用
-- 额外导出 `.txt` 文本，方便人工复制与编辑
+- Non-technical users should be able to run the full pipeline with a single command
+- During development, each step should be runnable independently for debugging
+- Output paths and directory structure should remain stable for skill packaging
+- JSON output should be designed for automation first
+- Also export `.txt` files for easy manual copy/paste and editing
 
-## 主命令
+## Main command
 
 ### `build`
 
-从 `pptx` 一次性执行到最终视频的完整流程。
+Run the full pipeline from `.pptx` to the final video in one shot.
 
-当前实现会按顺序执行：
+Current implementation runs (in order):
 
 - `extract`
 - `voice`
@@ -31,7 +31,7 @@ note2video <command> [options]
 note2video build input.pptx --out ./dist
 ```
 
-典型输出：
+Typical outputs:
 
 - `slides/`
 - `notes/notes.json`
@@ -45,17 +45,17 @@ note2video build input.pptx --out ./dist
 - `video/output.mp4`
 - `manifest.json`
 
-## 子命令
+## Subcommands
 
 ### `extract`
 
-从 PowerPoint 文件中提取页面图片、备注和脚本。
+Extract slide images, notes, and script from a PowerPoint file.
 
 ```bash
 note2video extract input.pptx --out ./work
 ```
 
-输出：
+Outputs:
 
 - `slides/*.png`
 - `notes/notes.json`
@@ -69,29 +69,29 @@ note2video extract input.pptx --out ./work
 
 ### `voice`
 
-根据脚本逐页生成配音音频。
+Generate voice-over audio per slide from the script.
 
-当前支持：
+Currently supported:
 
-- `edge`：更适合正式成片，推荐优先使用
-- `pyttsx3`：本地兜底方案，适合离线打通流程
+- `edge`: recommended for higher-quality results (requires network)
+- `pyttsx3`: local fallback, useful to validate the pipeline offline
 
 ```bash
 note2video voice ./work/scripts/script.json --out ./work
 note2video voice ./work/scripts/script.json --out ./work --tts-provider edge --voice zh-CN-XiaoxiaoNeural
 ```
 
-输出：
+Outputs:
 
 - `audio/001.wav`
 - `audio/002.wav`
 - `audio/merged.wav`
 - `audio/timings.json`
-- 更新 `manifest.json` 中的音频路径与时长信息
+- Updates `manifest.json` with audio paths and durations
 
 ### `voices`
 
-列出可用音色，便于先挑选 `voice id` 再执行 `voice` 或 `build`。
+List available voices, so you can choose a voice ID before running `voice` or `build`.
 
 ```bash
 note2video voices --tts-provider edge --keyword zh-CN
@@ -100,59 +100,57 @@ note2video voices --tts-provider edge --keyword Xiaoxiao --json
 
 ### `subtitle`
 
-根据脚本和时间信息生成字幕文件。
+Generate subtitle files from the script and timing information.
 
-当前实现采用句级切分，并按每页音频时长分配字幕时间。
-如果存在 `audio/timings.json`，则优先使用逐句配音得到的真实时间轴。
+Current implementation splits at sentence level and allocates subtitle timings based on per-slide audio duration.\nIf `audio/timings.json` exists, it will prefer the real per-sentence timing generated during TTS.
 
 ```bash
 note2video subtitle ./work/scripts/script.json --audio ./work/audio --out ./work/subtitles
 ```
 
-输出：
+Outputs:
 
 - `subtitles/subtitles.srt`
 - `subtitles/subtitles.json`
 
 ### `render`
 
-根据页面图片、音频和字幕渲染最终视频。
+Render the final video from slide images, audio, and subtitles.
 
-当前实现使用 `imageio-ffmpeg` 提供的 ffmpeg 可执行文件路径，不要求系统预先安装全局 `ffmpeg`。
-渲染成功后会自动清理 `video_only.mp4` 和 `slides.ffconcat` 这类中间文件。
+The current implementation uses the ffmpeg binary provided by `imageio-ffmpeg`, so you do not need a system-wide `ffmpeg` install.\nAfter rendering succeeds, it automatically cleans up intermediates like `video_only.mp4` and `slides.ffconcat`.
 
 ```bash
 note2video render ./work --out ./dist/output.mp4
 ```
 
-输出：
+Outputs:
 
 - `video/output.mp4`
 
-## 通用参数
+## Common options
 
-- `--out <dir>`：输出目录
-- `--temp <dir>`：临时工作目录
-- `--config <file>`：配置文件路径
-- `--overwrite`：覆盖已有输出
-- `--verbose`：详细日志
-- `--quiet`：最少日志
-- `--json`：输出机器可读的 JSON 摘要
+- `--out <dir>`: output directory
+- `--temp <dir>`: temporary working directory
+- `--config <file>`: config file path
+- `--overwrite`: overwrite existing outputs
+- `--verbose`: verbose logs
+- `--quiet`: minimal logs
+- `--json`: print a machine-readable JSON summary
 
-## 输入相关参数
+## Input-related options
 
 - `--notes-source <auto|speaker-notes|file>`
 - `--script-file <file>`
 - `--pages <range>`
 
-示例：
+Examples:
 
 ```bash
 note2video build input.pptx --pages 1-5
 note2video build input.pptx --script-file scripts.json
 ```
 
-## 配音相关参数
+## TTS-related options
 
 - `--tts-provider <name>`
 - `--voice <id>`
@@ -161,14 +159,14 @@ note2video build input.pptx --script-file scripts.json
 - `--style <value>`
 - `--voice-config <file>`
 
-示例：
+Examples:
 
 ```bash
 note2video build input.pptx --tts-provider edge --voice zh-CN-XiaoxiaoNeural
 note2video build input.pptx --voice narrator_female --rate 1.05
 ```
 
-## 脚本相关参数
+## Script-related options
 
 - `--script-mode <raw|clean|spoken>`
 - `--max-sentence-length <n>`
@@ -176,13 +174,13 @@ note2video build input.pptx --voice narrator_female --rate 1.05
 - `--normalize-numbers`
 - `--remove-brackets`
 
-示例：
+Examples:
 
 ```bash
 note2video build input.pptx --script-mode spoken --normalize-numbers
 ```
 
-## 视频相关参数
+## Video-related options
 
 - `--ratio <16:9|9:16|1:1>`
 - `--resolution <720p|1080p|custom>`
@@ -190,30 +188,30 @@ note2video build input.pptx --script-mode spoken --normalize-numbers
 - `--transition <none|fade>`
 - `--slide-padding-ms <n>`
 
-示例：
+Examples:
 
 ```bash
 note2video build input.pptx --ratio 9:16 --resolution 1080p
 ```
 
-## 字幕相关参数
+## Subtitle-related options
 
 - `--subtitle <on|off|soft|burn>`
 - `--subtitle-style <name>`
 - `--subtitle-max-chars <n>`
 
-示例：
+Examples:
 
 ```bash
 note2video build input.pptx --subtitle burn
 note2video subtitle ./work/notes/script.json --subtitle-max-chars 18
 ```
 
-## JSON 输出约定
+## JSON output contract
 
-当启用 `--json` 时，命令应向标准输出打印一个摘要对象。
+When `--json` is enabled, the command should print a summary object to stdout.
 
-示例：
+Example:
 
 ```json
 {
@@ -232,26 +230,26 @@ note2video subtitle ./work/notes/script.json --subtitle-max-chars 18
 }
 ```
 
-## 退出码
+## Exit codes
 
-- `0`：成功
-- `1`：一般运行时错误
-- `2`：CLI 参数错误
-- `3`：输入文件不存在或格式不支持
-- `4`：PowerPoint 解析或导出失败
-- `5`：TTS 生成失败
-- `6`：字幕生成失败
-- `7`：视频渲染失败
+- `0`: success
+- `1`: generic runtime error
+- `2`: CLI argument error
+- `3`: input file not found or unsupported format
+- `4`: PowerPoint parsing/export failed
+- `5`: TTS generation failed
+- `6`: subtitle generation failed
+- `7`: video rendering failed
 
-## 对 skill 封装的建议
+## Notes for skill packaging
 
-推荐暴露的高层动作：
+Recommended high-level actions to expose:
 
 - `ppt-to-video`
 - `ppt-to-assets`
 
-封装时建议优先：
+When packaging, prefer:
 
-- 显式指定输出目录
-- 使用 `--json` 获取机器可读结果
-- 保持产物路径稳定，方便二次调用
+- Explicitly specify an output directory
+- Use `--json` to obtain machine-readable results
+- Keep artifact paths stable for follow-up runs and integration

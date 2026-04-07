@@ -1,46 +1,46 @@
-# 001 产品定位
+# 001 Product positioning
 
-## 日期
+## Date
 
 2026-03-25
 
-## 状态
+## Status
 
-已采纳
+Accepted
 
-## 决策
+## Decision
 
-项目名称确定为 `Note2Video`，中文名为 `备注成片`。
+The project name is `Note2Video` (Chinese name: `Beizhu Chengpian`).
 
-产品定位为一个开源、免费、以 CLI 为先的工具，用于把 PowerPoint 备注转换为带配音和字幕的讲解视频。
+It is positioned as an open-source, free, **CLI-first** tool that converts PowerPoint speaker notes into narrated videos with voice-over and subtitles.
 
-## 原因
+## Rationale
 
-这个定位比泛泛的“PPT 转视频工具”更清晰：
+This positioning is clearer than a generic “PPT-to-video tool”:
 
-- 强调真实输入源是备注
-- 强调最终输出是讲解型视频
-- 适合在 GitHub 上以开源项目形式传播
-- 同时适合 CLI 和后续 skill 封装
+- The real input is speaker notes
+- The output is a narrated/explanatory video
+- It fits the open-source distribution model on GitHub
+- It works well for a CLI and future skill packaging
 
-项目不直接与完整编辑器竞争。它的核心价值在于自动化、可重复执行，以及对现有 PPT 内容资产的复用。
+The project does not compete directly with full editors. Its core value is automation, repeatability, and reusing existing PPT content assets.
 
-## 目标用户
+## Target users
 
-- 企业培训与内部赋能团队
-- 教师、讲师、课程制作者
-- 已经用 PPT 组织内容的知识创作者
-- 需要把这条能力嵌入自动化流程的开发者
+- Enterprise training / enablement teams
+- Teachers, instructors, course creators
+- Creators who already structure content in PPT
+- Developers embedding this capability into automated workflows
 
-## 非目标
+## Non-goals
 
-- 不做完整视频编辑器
-- 不追求复杂编辑能力或炫酷特效
-- 不把 TTS 音色数量作为主要竞争点
+- A full video editor
+- Advanced editing effects as the primary focus
+- Competing on the number of TTS voices as a key differentiator
 
-## 影响
+## Implications
 
-- 第一阶段公开交付形态应为 CLI
-- 核心流水线必须支持脚本化和自动化调用
-- 项目需要输出稳定的中间产物，而不只是最终 MP4
-- 未来的 skill 封装应该包装 CLI，而不是重写一套逻辑
+- The first public deliverable should be a CLI
+- The core pipeline must support scripting and automation
+- The project must persist stable intermediate artifacts, not just the final MP4
+- Future skill packaging should wrap the CLI instead of re-implementing the logic

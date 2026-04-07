@@ -700,6 +700,8 @@ def _convert_audio_to_wav(*, temp_audio: Path, output_file: Path) -> None:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         raise VoiceGenerationError(result.stderr.strip() or "Failed to convert Edge TTS audio to WAV.")
