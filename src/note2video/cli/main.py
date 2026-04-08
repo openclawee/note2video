@@ -5,6 +5,20 @@ import json
 from pathlib import Path
 
 from note2video import __version__
+from note2video.app.pipeline_service import (
+    BuildRequest,
+    ExtractRequest,
+    RenderRequest,
+    SubtitleRequest,
+    VoiceRequest,
+    VoicesRequest,
+    run_build_pipeline,
+    run_extract_pipeline,
+    run_render_pipeline,
+    run_subtitle_pipeline,
+    run_voice_pipeline,
+    run_voices_pipeline,
+)
 from note2video.parser.extract import PowerPointUnavailableError, extract_project
 from note2video.render.video import RenderError, render_video
 from note2video.subtitle.generate import SubtitleGenerationError, generate_subtitles
@@ -241,38 +255,37 @@ def _add_common_arguments(command: argparse.ArgumentParser) -> None:
 
 
 def handle_build(args: argparse.Namespace) -> int:
-    out_dir = Path(args.out)
-    manifest = extract_project(args.input, str(out_dir), pages=args.pages)
-    script_path = out_dir / "scripts" / "script.json"
-
-    voice_result = generate_voice_assets(
-        str(script_path),
-        str(out_dir),
-        provider_name=args.tts_provider or "pyttsx3",
-        voice_id=args.voice,
-        tts_rate=args.tts_rate,
-        minimax_base_url=None,
+    result = run_build_pipeline(
+        BuildRequest(
+            input_file=args.input,
+            out_dir=args.out,
+            pages=args.pages,
+            tts_provider=(args.tts_provider or "pyttsx3"),
+            voice_id=args.voice,
+            tts_rate=float(args.tts_rate),
+            bgm_path=(args.bgm.strip() or None),
+            bgm_volume=float(args.bgm_volume),
+            bgm_fade_in_s=float(args.bgm_fade_in),
+            bgm_fade_out_s=float(args.bgm_fade_out),
+            narration_volume=float(args.narration_volume),
+            subtitle_color=(args.subtitle_color.strip() or None),
+            subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
+            subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
+            subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
+            subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
+            subtitle_scale_from=int(args.subtitle_scale_from),
+            subtitle_scale_to=int(args.subtitle_scale_to),
+            subtitle_outline=int(args.subtitle_outline),
+            subtitle_shadow=int(args.subtitle_shadow),
+            subtitle_font=(args.subtitle_font.strip() or None),
+            subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
+        ),
+        extract_project_fn=extract_project,
+        generate_voice_assets_fn=generate_voice_assets,
+        generate_subtitles_fn=generate_subtitles,
+        render_video_fn=render_video,
     )
-    subtitle_result = generate_subtitles(str(script_path), str(out_dir))
-    render_result = render_video(
-        str(out_dir),
-        bgm_path=(args.bgm.strip() or None),
-        bgm_volume=float(args.bgm_volume),
-        bgm_fade_in_s=float(args.bgm_fade_in),
-        bgm_fade_out_s=float(args.bgm_fade_out),
-        narration_volume=float(args.narration_volume),
-        subtitle_color=(args.subtitle_color.strip() or None),
-        subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
-        subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
-        subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
-        subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
-        subtitle_scale_from=int(args.subtitle_scale_from),
-        subtitle_scale_to=int(args.subtitle_scale_to),
-        subtitle_outline=int(args.subtitle_outline),
-        subtitle_shadow=int(args.subtitle_shadow),
-        subtitle_font=(args.subtitle_font.strip() or None),
-        subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
-    )
+    out_dir = Path(result["output_dir"])
 
     payload = {
         "command": "build",
@@ -280,47 +293,43 @@ def handle_build(args: argparse.Namespace) -> int:
         "phase": "complete",
         "input": args.input,
         "output_dir": str(out_dir),
-        "artifacts": {
-            "manifest": "manifest.json",
-            "notes": "notes/notes.json",
-            "script": "scripts/script.json",
-            "audio_dir": "audio",
-            "merged_audio": "audio/merged.wav",
-            "subtitle": "subtitles/subtitles.srt",
-            "subtitle_json": "subtitles/subtitles.json",
-            "video": render_result["video"],
-        },
-        "slide_count": manifest.slide_count,
-        "segment_count": subtitle_result["segment_count"],
-        "voice_provider": voice_result["provider"],
-        "subtitles_burned": render_result["subtitles_burned"],
+        "artifacts": result["artifacts"],
+        "slide_count": result["slide_count"],
+        "segment_count": result["segment_count"],
+        "voice_provider": result["voice_provider"],
+        "subtitles_burned": result["subtitles_burned"],
         "message": "Full pipeline completed.",
     }
     return _emit_result(payload, json_output=args.json_output)
 
 
 def handle_extract(args: argparse.Namespace) -> int:
-    manifest = extract_project(args.input, args.out, pages=args.pages)
+    result = run_extract_pipeline(
+        ExtractRequest(input_file=args.input, out_dir=args.out, pages=args.pages),
+        extract_project_fn=extract_project,
+    )
     payload = {
         "command": "extract",
         "status": "ok",
         "phase": "implemented",
         "input": args.input,
-        "output_dir": str(Path(args.out)),
-        "artifacts": manifest.outputs,
-        "slide_count": manifest.slide_count,
+        "output_dir": str(Path(result["output_dir"])),
+        "artifacts": result["artifacts"],
+        "slide_count": result["slide_count"],
     }
     return _emit_result(payload, json_output=args.json_output)
 
 
 def handle_voice(args: argparse.Namespace) -> int:
-    result = generate_voice_assets(
-        args.input,
-        args.out,
-        provider_name=args.tts_provider,
-        voice_id=args.voice,
-        tts_rate=args.tts_rate,
-        minimax_base_url=None,
+    result = run_voice_pipeline(
+        VoiceRequest(
+            input_json=args.input,
+            out_dir=args.out,
+            tts_provider=args.tts_provider,
+            voice_id=args.voice,
+            tts_rate=float(args.tts_rate),
+        ),
+        generate_voice_assets_fn=generate_voice_assets,
     )
     payload = {
         "command": "voice",
@@ -342,24 +351,26 @@ def handle_voice(args: argparse.Namespace) -> int:
 
 
 def handle_voices(args: argparse.Namespace) -> int:
-    voices = list_available_voices(
-        provider_name=args.tts_provider,
-        keyword=args.keyword,
-        minimax_base_url=None,
+    result = run_voices_pipeline(
+        VoicesRequest(tts_provider=args.tts_provider, keyword=args.keyword),
+        list_available_voices_fn=list_available_voices,
     )
     payload = {
         "command": "voices",
         "status": "ok",
         "provider": args.tts_provider,
-        "count": len(voices),
-        "voices": voices,
-        "message": f"Listed {len(voices)} voices.",
+        "count": result["count"],
+        "voices": result["voices"],
+        "message": f"Listed {result['count']} voices.",
     }
     return _emit_result(payload, json_output=args.json_output)
 
 
 def handle_subtitle(args: argparse.Namespace) -> int:
-    result = generate_subtitles(args.input, args.out)
+    result = run_subtitle_pipeline(
+        SubtitleRequest(input_json=args.input, out_dir=args.out),
+        generate_subtitles_fn=generate_subtitles,
+    )
     payload = {
         "command": "subtitle",
         "status": "ok",
@@ -377,25 +388,28 @@ def handle_subtitle(args: argparse.Namespace) -> int:
 
 
 def handle_render(args: argparse.Namespace) -> int:
-    result = render_video(
-        args.input,
-        args.out if args.out != "./dist" else None,
-        bgm_path=(args.bgm.strip() or None),
-        bgm_volume=float(args.bgm_volume),
-        bgm_fade_in_s=float(args.bgm_fade_in),
-        bgm_fade_out_s=float(args.bgm_fade_out),
-        narration_volume=float(args.narration_volume),
-        subtitle_color=(args.subtitle_color.strip() or None),
-        subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
-        subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
-        subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
-        subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
-        subtitle_scale_from=int(args.subtitle_scale_from),
-        subtitle_scale_to=int(args.subtitle_scale_to),
-        subtitle_outline=int(args.subtitle_outline),
-        subtitle_shadow=int(args.subtitle_shadow),
-        subtitle_font=(args.subtitle_font.strip() or None),
-        subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
+    result = run_render_pipeline(
+        RenderRequest(
+            project_dir=args.input,
+            output_path=(args.out if args.out != "./dist" else None),
+            bgm_path=(args.bgm.strip() or None),
+            bgm_volume=float(args.bgm_volume),
+            bgm_fade_in_s=float(args.bgm_fade_in),
+            bgm_fade_out_s=float(args.bgm_fade_out),
+            narration_volume=float(args.narration_volume),
+            subtitle_color=(args.subtitle_color.strip() or None),
+            subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
+            subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
+            subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
+            subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
+            subtitle_scale_from=int(args.subtitle_scale_from),
+            subtitle_scale_to=int(args.subtitle_scale_to),
+            subtitle_outline=int(args.subtitle_outline),
+            subtitle_shadow=int(args.subtitle_shadow),
+            subtitle_font=(args.subtitle_font.strip() or None),
+            subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
+        ),
+        render_video_fn=render_video,
     )
     payload = {
         "command": "render",
@@ -404,7 +418,7 @@ def handle_render(args: argparse.Namespace) -> int:
         "output_dir": str(Path(args.input)),
         "slide_count": result["slide_count"],
         "artifacts": {
-            "video": result["video"],
+            "video": result["artifacts"]["video"],
         },
         "subtitles_burned": result["subtitles_burned"],
         "message": "Video rendered.",
