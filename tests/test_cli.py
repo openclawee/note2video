@@ -14,7 +14,7 @@ from note2video.parser.extract import (
 )
 from note2video.tts.voice import (
     EdgeTTSProvider,
-    Pyttsx3Provider,
+    VolcengineTTSProvider,
     _convert_audio_to_wav,
     _create_provider,
 )
@@ -479,17 +479,15 @@ def test_speaker_notes_and_script_cleanup() -> None:
 
 
 def test_tts_provider_selection() -> None:
-    assert isinstance(_create_provider(provider_name="pyttsx3", voice_id=""), Pyttsx3Provider)
     edge_provider = _create_provider(provider_name="edge", voice_id="")
     assert isinstance(edge_provider, EdgeTTSProvider)
     assert edge_provider.voice_id == "zh-CN-XiaoxiaoNeural"
     assert edge_provider.tts_rate == 1.0
-    minimax_cn = _create_provider(provider_name="minimax_cn", voice_id="")
-    assert minimax_cn.voice_id
-    assert minimax_cn.tts_rate == 1.0
-    minimax_gl = _create_provider(provider_name="minimax_global", voice_id="")
-    assert minimax_gl.voice_id
-    assert minimax_gl.tts_rate == 1.0
+    volc = _create_provider(provider_name="volcengine", voice_id="")
+    assert isinstance(volc, VolcengineTTSProvider)
+    assert volc.voice_id == "BV700_streaming"
+    doubao = _create_provider(provider_name="doubao", voice_id="")
+    assert isinstance(doubao, VolcengineTTSProvider)
 
 
 def test_voices_command_returns_success(monkeypatch) -> None:

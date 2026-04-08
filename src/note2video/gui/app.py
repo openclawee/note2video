@@ -98,7 +98,6 @@ def _run_tts_settings_dialog(parent, *, QtWidgets, append_log) -> None:
     from note2video.user_config import (
         default_tts_provider,
         load_user_config,
-        minimax_host_ui_index_from_provider_cfg,
         normalize_user_config,
         save_user_config,
         tts_provider_config,
@@ -120,15 +119,13 @@ def _run_tts_settings_dialog(parent, *, QtWidgets, append_log) -> None:
 
     provider_combo = QtWidgets.QComboBox()
     provider_combo.addItem("edge（本地/微软）", "edge")
-    provider_combo.addItem("minimax_cn（在线 / 国内）", "minimax_cn")
-    provider_combo.addItem("minimax_global（在线 / 国际）", "minimax_global")
+    provider_combo.addItem("豆包语音合成 2.0（doubao / V3）", "doubao")
     form.addRow("配置 Provider", provider_combo)
 
     default_combo = QtWidgets.QComboBox()
     default_combo.addItem("（不设置默认，仍按界面/命令行选择）", "")
     default_combo.addItem("edge", "edge")
-    default_combo.addItem("minimax_cn", "minimax_cn")
-    default_combo.addItem("minimax_global", "minimax_global")
+    default_combo.addItem("doubao", "doubao")
     form.addRow("默认 Provider", default_combo)
 
     current_default = default_tts_provider(merged) or ""
@@ -147,74 +144,56 @@ def _run_tts_settings_dialog(parent, *, QtWidgets, append_log) -> None:
     edge_layout.addStretch(1)
     stack.addWidget(edge_page)
 
-    # MiniMax CN page
-    minimax_page = QtWidgets.QWidget()
-    mm_form = QtWidgets.QFormLayout(minimax_page)
-
-    key_edit = QtWidgets.QLineEdit()
-    key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-    key_edit.setPlaceholderText("留空保留已保存的密钥；填写则覆盖")
-    mm_form.addRow("API Key", key_edit)
-    clear_key_chk = QtWidgets.QCheckBox("删除已保存的 API Key")
-    mm_form.addRow("", clear_key_chk)
-
-    mm_form.addRow("API 主机", QtWidgets.QLabel("固定：https://api.minimax.chat"))
-
-    mm_cfg = tts_provider_config(merged, "minimax_cn")
-    model_edit = QtWidgets.QLineEdit(str(mm_cfg.get("model") or "").strip() or "speech-2.8-hd")
-    mm_form.addRow("T2A 模型", model_edit)
-
-    timeout_spin = QtWidgets.QDoubleSpinBox()
-    timeout_spin.setMinimum(0)
-    timeout_spin.setMaximum(600)
-    timeout_spin.setDecimals(0)
-    timeout_spin.setSpecialValueText("默认（合成 60s / 列音色 30s）")
-    raw_to = mm_cfg.get("timeout_s")
-    if raw_to is not None and str(raw_to).strip() != "":
-        timeout_spin.setValue(float(raw_to))
+    # Doubao (V3) / OpenSpeech TTS page
+    volc_page = QtWidgets.QWidget()
+    volc_form = QtWidgets.QFormLayout(volc_page)
+    volc_hint = QtWidgets.QLabel(
+        "对应火山引擎控制台里的「豆包语音 → 语音合成」在线服务。\n"
+        "鉴权：填写控制台同一页上的 App ID 与 Access Token（访问令牌）。没有单独的 Secret Key 栏位——"
+        "若界面里只提供「密钥」或「Token」，请填在 Access Token 中即可；另需按控制台填写 Cluster（常见 volcano_tts）。\n"
+        "本软件仅保留 doubao（语音合成 2.0 / V3）与 edge 两种 Provider。\n"
+        "主界面「配音」里的 Voice ID 即 API 的 voice_type；「刷新音色」加载的是内置示例表，完整音色以控制台 / 文档为准，也可直接在 Voice 框粘贴 voice_type。"
+    )
+    volc_hint.setWordWrap(True)
+    volc_form.addRow("说明", volc_hint)
+    volc_cfg = tts_provider_config(merged, "volcengine")
+    volc_appid = QtWidgets.QLineEdit(str(volc_cfg.get("appid") or "").strip())
+    volc_appid.setPlaceholderText("可选；留空则使用环境变量 NOTE2VIDEO_VOLC_APPID")
+    volc_form.addRow("App ID", volc_appid)
+    volc_token = QtWidgets.QLineEdit()
+    volc_token.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+    volc_token.setPlaceholderText("留空保留已保存的 Token；填写则覆盖")
+    volc_form.addRow("Access Token", volc_token)
+    volc_clear_token = QtWidgets.QCheckBox("删除已保存的 Access Token")
+    volc_form.addRow("", volc_clear_token)
+    volc_cluster = QtWidgets.QLineEdit(str(volc_cfg.get("cluster") or "").strip() or "volcano_tts")
+    volc_form.addRow("Cluster", volc_cluster)
+    volc_base = QtWidgets.QLineEdit(str(volc_cfg.get("base_url") or "").strip())
+    volc_base.setPlaceholderText("默认 https://openspeech.bytedance.com/api/v3/tts/unidirectional")
+    volc_form.addRow("API URL（可选）", volc_base)
+    volc_rid = QtWidgets.QLineEdit(str(volc_cfg.get("resource_id") or "").strip())
+    volc_rid.setPlaceholderText("仅 V3 接口需要，例如 seed-tts-2.0（以控制台/文档为准）")
+    volc_form.addRow("Resource-Id（V3 可选）", volc_rid)
+    volc_timeout = QtWidgets.QDoubleSpinBox()
+    volc_timeout.setMinimum(0)
+    volc_timeout.setMaximum(600)
+    volc_timeout.setDecimals(0)
+    volc_timeout.setSpecialValueText("默认（60s）")
+    v_raw_to = volc_cfg.get("timeout_s")
+    if v_raw_to is not None and str(v_raw_to).strip() != "":
+        volc_timeout.setValue(float(v_raw_to))
     else:
-        timeout_spin.setValue(0)
-    mm_form.addRow("请求超时（秒，0=内置默认）", timeout_spin)
+        volc_timeout.setValue(0)
+    volc_form.addRow("请求超时（秒，0=内置默认）", volc_timeout)
 
-    stack.addWidget(minimax_page)
-
-    # MiniMax Global page
-    minimax_global_page = QtWidgets.QWidget()
-    mg_form = QtWidgets.QFormLayout(minimax_global_page)
-    mg_form.addRow("API 主机", QtWidgets.QLabel("固定：https://api.minimaxi.chat"))
-    g_key_edit = QtWidgets.QLineEdit()
-    g_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-    g_key_edit.setPlaceholderText("留空保留已保存的密钥；填写则覆盖")
-    mg_form.addRow("API Key", g_key_edit)
-    g_clear_key_chk = QtWidgets.QCheckBox("删除已保存的 API Key")
-    mg_form.addRow("", g_clear_key_chk)
-
-    mg_cfg = tts_provider_config(merged, "minimax_global")
-    g_model_edit = QtWidgets.QLineEdit(str(mg_cfg.get("model") or "").strip() or "speech-2.8-hd")
-    mg_form.addRow("T2A 模型", g_model_edit)
-
-    g_timeout_spin = QtWidgets.QDoubleSpinBox()
-    g_timeout_spin.setMinimum(0)
-    g_timeout_spin.setMaximum(600)
-    g_timeout_spin.setDecimals(0)
-    g_timeout_spin.setSpecialValueText("默认（合成 60s / 列音色 30s）")
-    g_raw_to = mg_cfg.get("timeout_s")
-    if g_raw_to is not None and str(g_raw_to).strip() != "":
-        g_timeout_spin.setValue(float(g_raw_to))
-    else:
-        g_timeout_spin.setValue(0)
-    mg_form.addRow("请求超时（秒，0=内置默认）", g_timeout_spin)
-
-    stack.addWidget(minimax_global_page)
+    stack.addWidget(volc_page)
 
     def _sync_stack() -> None:
         data = provider_combo.currentData()
         if data == "edge":
             stack.setCurrentIndex(0)
-        elif data == "minimax_cn":
-            stack.setCurrentIndex(1)
         else:
-            stack.setCurrentIndex(2)
+            stack.setCurrentIndex(1)
 
     provider_combo.currentIndexChanged.connect(lambda _i: _sync_stack())
     provider_combo.setCurrentIndex(0)
@@ -229,43 +208,50 @@ def _run_tts_settings_dialog(parent, *, QtWidgets, append_log) -> None:
             tts.pop("default_provider", None)
         merged["tts"] = tts
 
-        # provider-specific updates (MiniMax only for now)
+        # provider-specific updates (only doubao / volcengine storage)
         providers = dict((tts.get("providers") or {}) if isinstance(tts.get("providers"), dict) else {})
-        mm_cn = dict((providers.get("minimax_cn") or {}) if isinstance(providers.get("minimax_cn"), dict) else {})
-        mm_gl = dict((providers.get("minimax_global") or {}) if isinstance(providers.get("minimax_global"), dict) else {})
+        volc = dict((providers.get("volcengine") or {}) if isinstance(providers.get("volcengine"), dict) else {})
 
-        if clear_key_chk.isChecked():
-            mm_cn["api_key"] = ""
-        elif key_edit.text().strip():
-            mm_cn["api_key"] = key_edit.text().strip()
+        if volc_clear_token.isChecked():
+            volc["token"] = ""
+        elif volc_token.text().strip():
+            volc["token"] = volc_token.text().strip()
 
-        mm_cn_model = model_edit.text().strip()
-        if mm_cn_model:
-            mm_cn["model"] = mm_cn_model
+        va = volc_appid.text().strip()
+        if va:
+            volc["appid"] = va
         else:
-            mm_cn.pop("model", None)
-        if timeout_spin.value() > 0:
-            mm_cn["timeout_s"] = int(timeout_spin.value())
-        else:
-            mm_cn.pop("timeout_s", None)
+            volc.pop("appid", None)
 
-        if g_clear_key_chk.isChecked():
-            mm_gl["api_key"] = ""
-        elif g_key_edit.text().strip():
-            mm_gl["api_key"] = g_key_edit.text().strip()
-
-        mm_gl_model = g_model_edit.text().strip()
-        if mm_gl_model:
-            mm_gl["model"] = mm_gl_model
+        vc = volc_cluster.text().strip()
+        if vc:
+            volc["cluster"] = vc
         else:
-            mm_gl.pop("model", None)
-        if g_timeout_spin.value() > 0:
-            mm_gl["timeout_s"] = int(g_timeout_spin.value())
-        else:
-            mm_gl.pop("timeout_s", None)
+            volc.pop("cluster", None)
 
-        providers["minimax_cn"] = mm_cn
-        providers["minimax_global"] = mm_gl
+        vb = volc_base.text().strip().rstrip("/")
+        if vb:
+            volc["base_url"] = vb
+        else:
+            volc.pop("base_url", None)
+
+        vr = volc_rid.text().strip()
+        if vr:
+            volc["resource_id"] = vr
+        else:
+            volc.pop("resource_id", None)
+
+        if volc_timeout.value() > 0:
+            volc["timeout_s"] = int(volc_timeout.value())
+        else:
+            volc.pop("timeout_s", None)
+
+        providers["volcengine"] = volc
+        # Drop legacy providers to keep config minimal.
+        providers.pop("minimax_cn", None)
+        providers.pop("minimax_global", None)
+        providers.pop("pyttsx3", None)
+        providers.pop("edge", None)
         tts["providers"] = providers
         merged["tts"] = tts
 
@@ -444,6 +430,9 @@ def _build_worker(QtCore, config: JobConfig):
         done = QtCore.Signal(int)
 
         def run(self) -> None:
+            # Enable fault handler in this thread to capture crashes/exceptions.
+            import faulthandler
+            faulthandler.enable()
             try:
                 exit_code = _run_extract_or_build(config, self.log.emit)
             except Exception:
@@ -466,6 +455,9 @@ def _build_ui(QtWidgets, QtCore):
     class MainWindow(QtWidgets.QMainWindow):
         def __init__(self) -> None:
             super().__init__()
+            # Must be set before _restore_gui_state_from_config() (outer wrapper assigns these after __init__).
+            self._QtCore = QtCore
+            self._QtWidgets = QtWidgets
             self.setWindowTitle("Note2Video / 备注成片")
 
             menu_bar = QtWidgets.QMenuBar(self)
@@ -549,8 +541,10 @@ def _build_ui(QtWidgets, QtCore):
             tts_grid.setColumnStretch(3, 1)
             left.addWidget(tts_group)
 
+            # item data = canonical provider name used internally by voice.py / config
             self.tts_combo = QtWidgets.QComboBox()
-            self.tts_combo.addItems(["pyttsx3", "edge", "minimax_cn", "minimax_global"])
+            self.tts_combo.addItem("edge（微软 / 本地）", "edge")
+            self.tts_combo.addItem("豆包 / 火山引擎（V3）", "doubao")
             tts_grid.addWidget(QtWidgets.QLabel("Provider"), 0, 0)
             tts_grid.addWidget(self.tts_combo, 0, 1)
 
@@ -568,7 +562,10 @@ def _build_ui(QtWidgets, QtCore):
             self.voice_combo.setMaxVisibleItems(18)
             self._voice_combo_reset_default()
             self.voice_refresh_btn = QtWidgets.QPushButton("刷新音色")
-            self.voice_refresh_btn.setToolTip("从当前 Provider 拉取可用音色（edge/minimax 需网络；minimax 需 API Key）。")
+            self.voice_refresh_btn.setToolTip(
+                "从当前 Provider 加载音色列表：edge / MiniMax 走在线接口；"
+                "volcengine / doubao 为内置常用 voice_type 示例（火山未提供此处一键拉全量列表），完整列表见控制台或文档，亦可手动输入 Voice ID。"
+            )
             self.voice_preview_btn = QtWidgets.QPushButton("试听")
             self.voice_preview_btn.setToolTip(f"用当前 Provider、音色与语速合成一句试听：{PREVIEW_SAMPLE_TEXT}")
             voice_row.addWidget(self.voice_combo, 1)
@@ -976,7 +973,7 @@ def _build_ui(QtWidgets, QtCore):
             self.extract_btn.clicked.connect(lambda: self._start("extract"))
             self.build_btn.clicked.connect(lambda: self._start("build"))
             self.stop_btn.clicked.connect(self._stop)
-            self.tts_combo.currentTextChanged.connect(self._on_tts_provider_changed)
+            self.tts_combo.currentIndexChanged.connect(self._on_tts_provider_changed)
             self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
             self.voice_refresh_btn.clicked.connect(self._refresh_voice_list)
             self.voice_preview_btn.clicked.connect(self._preview_voice)
@@ -1034,7 +1031,7 @@ def _build_ui(QtWidgets, QtCore):
 
             prov = _get_str("tts_provider", "").strip()
             if prov:
-                idx = self.tts_combo.findText(prov)
+                idx = self.tts_combo.findData(prov)
                 if idx >= 0:
                     self.tts_combo.setCurrentIndex(idx)
 
@@ -1183,7 +1180,7 @@ def _build_ui(QtWidgets, QtCore):
                     "pptx_path": self.pptx_edit.text().strip(),
                     "out_dir": self.out_edit.text().strip(),
                     "pages": self.pages_edit.text().strip() or "all",
-                    "tts_provider": self.tts_combo.currentText().strip(),
+                    "tts_provider": str(self.tts_combo.currentData() or ""),
                     "voice_id": self._current_voice_id(),
                     "tts_rate": float(self.tts_rate_spin.value()),
                     "subtitle_color": self.subtitle_color_value.text().strip(),
@@ -1300,7 +1297,7 @@ def _build_ui(QtWidgets, QtCore):
             self.voice_combo.setCurrentIndex(0)
             self.voice_combo.blockSignals(False)
 
-        def _on_tts_provider_changed(self, _text: str) -> None:
+        def _on_tts_provider_changed(self, _index: int) -> None:
             self._all_voice_items = []
             self.locale_combo.blockSignals(True)
             self.locale_combo.clear()
@@ -1308,6 +1305,8 @@ def _build_ui(QtWidgets, QtCore):
             self.locale_combo.setCurrentIndex(0)
             self.locale_combo.blockSignals(False)
             self._voice_combo_reset_default()
+            # 自动触发刷新音色列表（与主界面"刷新音色"行为一致）
+            self._refresh_voice_list()
 
         def _current_voice_id(self) -> str:
             idx = self.voice_combo.currentIndex()
@@ -1358,14 +1357,18 @@ def _build_ui(QtWidgets, QtCore):
         def _refresh_voice_list(self) -> None:
             from note2video.tts.voice import VoiceGenerationError, list_available_voices
 
-            provider = self.tts_combo.currentText().strip() or "pyttsx3"
+            provider = str(self.tts_combo.currentData() or "edge")
             self._append_log(f"正在加载音色列表：{provider} …")
             try:
                 voices = list_available_voices(provider_name=provider, keyword="")
             except (VoiceGenerationError, ValueError) as exc:
-                self._append_log(f"音色列表加载失败：{exc}")
+                self._append_log(f"音色列表加载失败（{provider}）：{exc}")
                 QtWidgets = self._QtWidgets
-                QtWidgets.QMessageBox.warning(self, "音色列表", str(exc))
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    f"音色列表加载失败（{provider}）",
+                    f"Provider: {provider}\n\n{str(exc)}",
+                )
                 return
             self._all_voice_items = list(voices[:800])
             raw_keys = sorted(
@@ -1403,7 +1406,7 @@ def _build_ui(QtWidgets, QtCore):
                 except OSError:
                     pass
 
-            provider = self.tts_combo.currentText().strip() or "pyttsx3"
+            provider = str(self.tts_combo.currentData() or "edge")
             voice_id = self._current_voice_id()
             rate = float(self.tts_rate_spin.value())
 
@@ -1450,8 +1453,11 @@ def _build_ui(QtWidgets, QtCore):
                 creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
             try:
+                from note2video.user_config import tts_subprocess_environ
+
                 self._preview_proc = subprocess.Popen(
                     cmd,
+                    env=tts_subprocess_environ(),
                     stdout=(self._preview_log_fh if self._preview_log_fh is not None else subprocess.DEVNULL),
                     stderr=(self._preview_log_fh if self._preview_log_fh is not None else subprocess.DEVNULL),
                     creationflags=creationflags,
@@ -1499,7 +1505,14 @@ def _build_ui(QtWidgets, QtCore):
                 if self._preview_log_path and self._preview_log_path.exists():
                     try:
                         raw = self._preview_log_path.read_bytes()
-                        log_text = raw.decode("utf-8", errors="replace").strip()
+                        try:
+                            log_text = raw.decode("utf-8").strip()
+                        except UnicodeDecodeError:
+                            # Windows subprocess traceback is often encoded in CP936/GBK.
+                            import locale
+
+                            enc = locale.getpreferredencoding(False) or "gbk"
+                            log_text = raw.decode(enc, errors="replace").strip()
                     except Exception:
                         log_text = ""
 
@@ -1508,7 +1521,7 @@ def _build_ui(QtWidgets, QtCore):
                     self._append_log(f"试听子进程退出码：{rc}")
                     if log_text:
                         self._append_log("preview subprocess log:\n" + log_text)
-                    QtWidgets.QMessageBox.warning(self, "试听失败", f"试听子进程退出码：{rc}\n请查看下方日志。")
+                    QtWidgets.QMessageBox.warning(self, f"试听失败（{provider}）", f"Provider: {provider}\n退出码：{rc}\n请查看下方日志。")
                     return
 
                 if not p or not p.exists():
@@ -1954,7 +1967,7 @@ def _build_ui(QtWidgets, QtCore):
             pptx = Path(self.pptx_edit.text().strip().strip('"'))
             out_dir = Path(self.out_edit.text().strip().strip('"'))
             pages = self.pages_edit.text().strip() or "all"
-            tts_provider = self.tts_combo.currentText().strip()
+            tts_provider = str(self.tts_combo.currentData() or "")
             voice_id = self._current_voice_id()
             tts_rate = float(self.tts_rate_spin.value())
             subtitle_color = self.subtitle_color_value.text().strip() or None
@@ -2113,12 +2126,7 @@ def _build_ui(QtWidgets, QtCore):
             self.progress.setValue(0)
             self.progress.setFormat("进度：准备中 (0/4)")
 
-            # PowerPoint COM on Windows must run on the GUI (STA) thread; a QThread
-            # background worker often fails or hangs during extract.
-            if sys.platform == "win32":
-                QtCore.QTimer.singleShot(0, partial(self._finish_pipeline_main_thread, config))
-                return
-
+            # Run pipeline in a background thread so the GUI stays responsive.
             thread = QtCore.QThread()
             worker = _build_worker(QtCore, config)
             self._thread = thread

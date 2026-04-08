@@ -38,8 +38,9 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
     scripts = _load_scripts(input_path)
     manifest = _load_manifest(manifest_path)
     timing_segments = _load_timing_segments(project_dir, manifest)
+    word_timings = _load_word_timing_segments(project_dir, manifest)
     if timing_segments is not None:
-        segments = _build_segments_from_timings(timing_segments)
+        segments = _build_segments_from_timings(timing_segments, word_timings=word_timings)
     else:
         durations = _load_slide_durations(manifest)
         segments = _build_segments(scripts=scripts, durations=durations)
@@ -122,6 +123,33 @@ def _load_timing_segments(project_dir: Path, manifest: dict[str, Any]) -> list[d
     return segments
 
 
+def _load_word_timing_segments(project_dir: Path, manifest: dict[str, Any]) -> dict[tuple[int, int], list[dict[str, Any]]]:
+    """
+    Load word-level timing from word_timings.json if available.
+
+    Returns a dict keyed by (page, sentence_index) → list of word dicts
+    with {text, offset_ms, duration_ms}.
+    """
+    word_timings_rel = manifest.get("outputs", {}).get("word_timings")
+    if not word_timings_rel:
+        return {}
+    word_timings_path = project_dir / word_timings_rel
+    if not word_timings_path.exists():
+        return {}
+    payload = json.loads(word_timings_path.read_text(encoding="utf-8"))
+    segments = payload.get("segments")
+    if not isinstance(segments, list):
+        return {}
+    # Index by (page, sentence_index) for O(1) lookup when building ASS lines.
+    result: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for seg in segments:
+        words = seg.get("words") or []
+        if isinstance(words, list) and words:
+            key = (int(seg["page"]), int(seg["sentence_index"]))
+            result[key] = words
+    return result
+
+
 def _build_segments(
     *,
     scripts: list[dict[str, Any]],
@@ -175,18 +203,28 @@ def _build_segments(
     return segments
 
 
-def _build_segments_from_timings(timing_segments: list[dict[str, Any]]) -> list[SubtitleSegment]:
+def _build_segments_from_timings(
+    timing_segments: list[dict[str, Any]],
+    *,
+    word_timings: dict[tuple[int, int], list[dict[str, Any]]],
+) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     for item in timing_segments:
+        page = int(item["page"])
+        sentence_index = int(item.get("sentence_index", 0) or 0)
+        words = word_timings.get((page, sentence_index), []) or []
         segments.append(
             SubtitleSegment(
                 index=int(item["index"]),
-                page=int(item["page"]),
+                page=page,
                 start_ms=int(item["start_ms"]),
                 end_ms=int(item["end_ms"]),
                 text=str(item.get("text", "")),
             )
         )
+        if words:
+            # Attach words to the last segment's __dict__ so build_ass can read it.
+            segments[-1].__dict__["words"] = words
     return segments
 
 

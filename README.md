@@ -71,7 +71,7 @@ Launch the app:
 note2video-gui
 ```
 
-MiniMax settings can be edited via the menu **Settings → MiniMax & Model…** and saved to the user config file (see MiniMax section below).
+TTS 相关设置（MiniMax、火山引擎 / 豆包等）可在菜单 **设置 → TTS Provider…** 中编辑并写入用户配置文件（见下文各小节）。
 
 Package as an exe (PyInstaller; recommended to run in a clean venv):
 
@@ -124,12 +124,28 @@ Enable:
 - **Windows**: `%LOCALAPPDATA%\note2video\config.json`
 - **Linux / macOS**: `~/.config/note2video/config.json`
 
-Supported fields (JSON): `tts.default_provider`, plus `tts.providers.minimax_cn.api_key` / `model` / `timeout_s`, and `tts.providers.minimax_global.api_key` / `model` / `timeout_s` (optional integer seconds). **Priority**: environment variables override config file.
+Supported fields (JSON): `tts.default_provider`, plus `tts.providers.minimax_cn.api_key` / `model` / `timeout_s`, `tts.providers.minimax_global.api_key` / `model` / `timeout_s`, and `tts.providers.volcengine.appid` / `token` / `cluster` / `base_url` / `timeout_s` (optional integer seconds). **Priority**: environment variables override config file.
 
 CLI can also override per run:
 
 ```bash
 note2video build input.pptx --out ./dist --tts-provider minimax_cn --voice "Chinese (Mandarin)_News_Anchor" --tts-rate 1.1
+```
+
+## 火山引擎 / 豆包语音合成（可选）
+
+在线短文本合成使用 OpenSpeech HTTP 接口（与控制台「豆包语音 / 语音合成」文档一致）。CLI / GUI 中 Provider 名：`volcengine`；别名 **`doubao`**、**`doubao_tts`**（与 `volcengine` 等价）。
+
+- **凭据**：`NOTE2VIDEO_VOLC_APPID`、`NOTE2VIDEO_VOLC_TOKEN`（或 `VOLC_TOKEN`）；也可写入用户配置 `tts.providers.volcengine.appid` / `token`
+- **Cluster**：`NOTE2VIDEO_VOLC_CLUSTER`，或配置 `cluster`（常见为 `volcano_tts`，以控制台为准）
+- **接口地址**（可选）：`NOTE2VIDEO_VOLC_TTS_URL` 或 `NOTE2VIDEO_DOUBAO_TTS_URL`，或配置 `base_url`；默认 `https://openspeech.bytedance.com/api/v1/tts`
+- **超时**：`NOTE2VIDEO_VOLC_TIMEOUT_S` 或配置 `timeout_s`（默认约 60s）
+- **音色**：`voice_type` 与控制台一致（GUI 可手动填写或从内置列表选）；默认示例 `BV700_streaming`
+
+```bash
+note2video build deck.pptx --out ./dist --tts-provider volcengine --voice BV700_streaming
+# 或
+note2video build deck.pptx --out ./dist --tts-provider doubao --voice BV700_streaming
 ```
 
 ## Platforms and slide export

@@ -152,7 +152,7 @@ note2video build input.pptx --script-file scripts.json
 
 ## TTS-related options
 
-- `--tts-provider <name>`
+- `--tts-provider <name>` — 例如 `edge`、`minimax_cn`、`minimax_global`、`volcengine`（火山 / 豆包；别名 `doubao`）
 - `--voice <id>`
 - `--rate <value>`
 - `--pitch <value>`

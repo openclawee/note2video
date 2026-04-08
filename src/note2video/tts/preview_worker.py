@@ -14,6 +14,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", required=True, help="Output WAV path.")
     args = parser.parse_args(argv)
 
+    # Subprocess does not inherit in-memory GUI state; merge saved credentials into env
+    # so volcengine/doubao works when AppID/Token are only in user config.
+    from note2video.user_config import apply_stored_tts_secrets_to_environ
+
+    apply_stored_tts_secrets_to_environ()
+
     from note2video.tts.voice import synthesize_preview_sample
 
     out_path = Path(args.out)

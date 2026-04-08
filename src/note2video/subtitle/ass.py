@@ -142,7 +142,10 @@ def build_ass(
             events.append(line)
             continue
 
-        # highlight_mode == "word"
+        # highlight_mode == "word": use per-word color highlight on the subtitle line itself.
+        # Approach: draw a highlight-colored rectangle behind each word using \clip with
+        # a vector drawing. Character positions are proportional to word timing:
+        #   word_char_end = word_offset_ms / sentence_duration_ms * total_chars
         words = seg.get("words") or []
         if not isinstance(words, list) or not words:
             # Fallback: treat as line highlight.
@@ -156,13 +159,37 @@ def build_ass(
             events.append(line)
             continue
 
-        # Strategy: show base line, then overlay a highlight line that uses karaoke-like segments by
-        # emitting many short events each highlighting one word boundary.
+        # Build vector path for the full sentence: each character as a rect of equal width.
+        # Path coordinate system: 1 DU = 1/20th of a pixel at PlayResX=1920.
+        # Subtitle area: x=80..x=1840 (MarginL=80, MarginR=80), total width = 1760 px = 35200 DU.
+        SUB_AREA_LEFT = 80 * 20   # = 1600 DU
+        SUB_AREA_RIGHT = 1840 * 20  # = 36800 DU
+        SUB_AREA_WIDTH = SUB_AREA_RIGHT - SUB_AREA_LEFT  # = 35200 DU
+        SUB_H = font_size * 20 * 2   # height: 2x font size in DU
+
+        raw_text = str(seg.get("text", "") or "").strip()
+        n_chars = len(raw_text) or 1
+        CHAR_W = SUB_AREA_WIDTH // n_chars  # drawing units per character slot
+
+        def _word_clip_rect(word_text: str, word_offset_ms: int, word_dur_ms: int) -> str:
+            """Build a vector clip rect for a word's character range in drawing units."""
+            if not raw_text:
+                return ""
+            # Find word's character range: proportional to timing within the sentence.
+            word_start_ratio = max(0.0, min(1.0, word_offset_ms / dur_ms)) if dur_ms > 0 else 0.0
+            word_end_ratio = max(0.0, min(1.0, (word_offset_ms + word_dur_ms) / dur_ms)) if dur_ms > 0 else 1.0
+            word_start_char = int(round(word_start_ratio * n_chars))
+            word_end_char = int(round(word_end_ratio * n_chars))
+            word_end_char = max(word_end_char, word_start_char + 1)  # at least 1 char
+            x0 = SUB_AREA_LEFT + word_start_char * CHAR_W
+            x1 = SUB_AREA_LEFT + word_end_char * CHAR_W
+            y0 = 0
+            y1 = SUB_H
+            return f"m {x0} {y0} l {x1} {y0} l {x1} {y1} l {x0} {y1} 0 0"
+
         base_line = f"Dialogue: 0,{_fmt_time(start_ms)},{_fmt_time(end_ms)},Default,,0,0,0,,{anim}{text}"
         events.append(base_line)
 
-        # Overlay events: each boundary highlights the boundary.text only during its time window.
-        # This is robust even when word segmentation is odd (e.g. Chinese character chunks).
         for w in words:
             try:
                 off = int(w.get("offset_ms", 0))
@@ -175,14 +202,15 @@ def build_ass(
             w_end = min(end_ms, w_start + d)
             if w_end <= w_start:
                 continue
-            w_text = _escape_text(str(w.get("text", "") or "").strip())
-            if not w_text:
+            clip_rect = _word_clip_rect(str(w.get("text", "") or "").strip(), off, d)
+            if not clip_rect:
                 continue
-            overlay = (
+            # Clip the full subtitle text to just this word's character range, color hi.
+            hi_line = (
                 f"Dialogue: 5,{_fmt_time(w_start)},{_fmt_time(w_end)},Default,,0,0,0,,"
-                rf"{{\1c{hi}}}{w_text}"
+                rf"{{\pos(80,900)\an4\clip(\p1{clip_rect}\p0)\1c{hi}\3c{hi}}}{text}"
             )
-            events.append(overlay)
+            events.append(hi_line)
 
     return "\n".join(style_parts + events) + "\n"
 

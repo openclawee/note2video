@@ -113,3 +113,47 @@ def save_user_config(data: dict[str, Any]) -> None:
         pass
     else:
         invalidate_user_config_cache()
+
+
+def _merge_volc_from_user_config_into(env: dict[str, str]) -> None:
+    """Fill volcengine-related env keys from disk config when currently blank."""
+    cfg = normalize_user_config(load_user_config())
+    volc = tts_provider_config(cfg, "volcengine")
+
+    def blank(key: str) -> bool:
+        return not str(env.get(key, "") or "").strip()
+
+    appid = str(volc.get("appid") or "").strip()
+    if appid and blank("NOTE2VIDEO_VOLC_APPID"):
+        env["NOTE2VIDEO_VOLC_APPID"] = appid
+
+    token = str(volc.get("token") or "").strip()
+    if token and blank("NOTE2VIDEO_VOLC_TOKEN") and blank("VOLC_TOKEN"):
+        env["NOTE2VIDEO_VOLC_TOKEN"] = token
+
+    cluster = str(volc.get("cluster") or "").strip()
+    if cluster and blank("NOTE2VIDEO_VOLC_CLUSTER"):
+        env["NOTE2VIDEO_VOLC_CLUSTER"] = cluster
+
+    base_url = str(volc.get("base_url") or "").strip()
+    if base_url and blank("NOTE2VIDEO_VOLC_TTS_URL") and blank("NOTE2VIDEO_DOUBAO_TTS_URL"):
+        env["NOTE2VIDEO_VOLC_TTS_URL"] = base_url
+
+    raw_to = volc.get("timeout_s")
+    if raw_to is not None and str(raw_to).strip() != "" and blank("NOTE2VIDEO_VOLC_TIMEOUT_S"):
+        try:
+            env["NOTE2VIDEO_VOLC_TIMEOUT_S"] = str(int(float(raw_to)))
+        except (TypeError, ValueError):
+            pass
+
+
+def apply_stored_tts_secrets_to_environ() -> None:
+    """Apply volcengine credentials from user config into the current process (e.g. preview_worker)."""
+    _merge_volc_from_user_config_into(os.environ)
+
+
+def tts_subprocess_environ() -> dict[str, str]:
+    """Full ``os.environ`` copy with volcengine secrets merged in for ``subprocess.Popen(..., env=...)``."""
+    out: dict[str, str] = {str(k): str(v) for k, v in os.environ.items()}
+    _merge_volc_from_user_config_into(out)
+    return out

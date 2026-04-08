@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -81,10 +82,8 @@ def list_available_voices(
     normalized = provider_name.strip().lower() or "edge"
     if normalized == "edge":
         return _list_edge_voices(keyword=keyword)
-    if normalized == "pyttsx3":
-        return _list_pyttsx3_voices(keyword=keyword)
-    if normalized in {"minimax_cn", "mimax_cn", "minimax_global", "mimax_global"}:
-        return _list_minimax_voices(provider_name=normalized, keyword=keyword)
+    if normalized in {"volcengine", "volc", "huoshan", "doubao", "doubao_tts"}:
+        return _list_volcengine_voices(keyword=keyword)
     raise ValueError(f"Unsupported TTS provider: {provider_name}")
 
 
@@ -103,7 +102,7 @@ def generate_voice_assets(
     input_json: str,
     output_dir: str,
     *,
-    provider_name: str = "pyttsx3",
+    provider_name: str = "edge",
     voice_id: str = "",
     tts_rate: float = 1.0,
     minimax_base_url: str | None = None,
@@ -276,19 +275,15 @@ def _create_provider(
 ):
     normalized = provider_name.strip().lower() or "pyttsx3"
     rate_mult = _clamp_tts_rate(tts_rate)
-    if normalized == "pyttsx3":
-        return Pyttsx3Provider(voice_id=voice_id, tts_rate=rate_mult)
     if normalized == "edge":
         return EdgeTTSProvider(
             voice_id=voice_id or "zh-CN-XiaoxiaoNeural",
             tts_rate=rate_mult,
         )
-    if normalized in {"minimax_cn", "mimax_cn", "minimax_global", "mimax_global"}:
-        return MiniMaxTTSProvider(
-            provider_name=normalized,
-            voice_id=voice_id or "Chinese (Mandarin)_News_Anchor",
+    if normalized in {"volcengine", "volc", "huoshan", "doubao", "doubao_tts"}:
+        return VolcengineTTSProvider(
+            voice_id=voice_id or "BV700_streaming",
             tts_rate=rate_mult,
-            api_base_url=minimax_base_url,
         )
     raise ValueError(f"Unsupported TTS provider: {provider_name}")
 
@@ -303,13 +298,13 @@ def synthesize_preview_sample(
     minimax_base_url: str | None = None,
 ) -> None:
     """Synthesize a short clip for GUI preview (same engines as the build pipeline)."""
-    normalized = (provider_name or "pyttsx3").strip().lower() or "pyttsx3"
+    normalized = (provider_name or "edge").strip().lower() or "edge"
     vid = (voice_id or "").strip()
     if not vid:
         if normalized == "edge":
             vid = "zh-CN-XiaoxiaoNeural"
-        elif normalized in {"minimax_cn", "mimax_cn", "minimax_global", "mimax_global"}:
-            vid = "Chinese (Mandarin)_News_Anchor"
+        elif normalized in {"volcengine", "volc", "huoshan", "doubao", "doubao_tts"}:
+            vid = "BV700_streaming"
     provider = _create_provider(
         provider_name=provider_name,
         voice_id=vid,
@@ -367,7 +362,7 @@ class EdgeTTSProvider:
         rate_str = f"{pct:+d}%"
 
         async def _run(rate: str) -> None:
-            communicate = edge_tts.Communicate(text=text, voice=self.voice_id, rate=rate)
+            communicate = edge_tts.Communicate(text=text, voice=self.voice_id, rate=rate, boundary="WordBoundary")
             await communicate.save(str(temp_audio))
 
         last_exc: Exception | None = None
@@ -420,7 +415,7 @@ class EdgeTTSProvider:
         rate_str = f"{pct:+d}%"
 
         async def _run_collect(rate: str) -> list[dict[str, Any]]:
-            communicate = edge_tts.Communicate(text=text, voice=self.voice_id, rate=rate)
+            communicate = edge_tts.Communicate(text=text, voice=self.voice_id, rate=rate, boundary="WordBoundary")
             boundaries: list[dict[str, Any]] = []
             with open(temp_audio, "wb") as f:
                 async for chunk in communicate.stream():
@@ -556,6 +551,259 @@ class MiniMaxTTSProvider:
                 temp_audio.unlink()
 
 
+def _volc_appid() -> str:
+    env = (os.getenv("NOTE2VIDEO_VOLC_APPID") or "").strip()
+    if env:
+        return env
+    return str(tts_provider_config(_user_cfg(), "volcengine").get("appid") or "").strip()
+
+
+def _volc_token() -> str:
+    env = (os.getenv("NOTE2VIDEO_VOLC_TOKEN") or os.getenv("VOLC_TOKEN") or "").strip()
+    if env:
+        return env
+    return str(tts_provider_config(_user_cfg(), "volcengine").get("token") or "").strip()
+
+
+def _volc_cluster() -> str:
+    env = (os.getenv("NOTE2VIDEO_VOLC_CLUSTER") or "").strip()
+    if env:
+        return env
+    raw = str(tts_provider_config(_user_cfg(), "volcengine").get("cluster") or "").strip()
+    return raw or "volcano_tts"
+
+
+# Default to Doubao TTS 2.0 (V3) unidirectional endpoint.
+# Users can override via NOTE2VIDEO_VOLC_TTS_URL / NOTE2VIDEO_DOUBAO_TTS_URL or config tts.providers.volcengine.base_url.
+_DEFAULT_VOLC_TTS_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
+
+
+def _volc_base_url() -> str:
+    for key in ("NOTE2VIDEO_VOLC_TTS_URL", "NOTE2VIDEO_DOUBAO_TTS_URL"):
+        raw = (os.getenv(key) or "").strip().rstrip("/")
+        if raw:
+            return raw
+    cfg = str(tts_provider_config(_user_cfg(), "volcengine").get("base_url") or "").strip().rstrip("/")
+    return cfg or _DEFAULT_VOLC_TTS_URL
+
+
+def _volc_timeout_s() -> float:
+    env = (os.getenv("NOTE2VIDEO_VOLC_TIMEOUT_S") or "").strip()
+    if env:
+        return float(env)
+    raw = tts_provider_config(_user_cfg(), "volcengine").get("timeout_s")
+    if raw is not None and str(raw).strip() != "":
+        return float(raw)
+    return 60.0
+
+
+def _volc_resource_id() -> str:
+    """
+    Some Doubao/Volcengine V3 endpoints require a Resource-Id header.
+
+    Example (varies by console/service): seed-tts-2.0
+    """
+    for key in ("NOTE2VIDEO_VOLC_RESOURCE_ID", "NOTE2VIDEO_DOUBAO_RESOURCE_ID"):
+        raw = (os.getenv(key) or "").strip()
+        if raw:
+            return raw
+    return str(tts_provider_config(_user_cfg(), "volcengine").get("resource_id") or "").strip()
+
+
+def _volc_tts_success(code: Any) -> bool:
+    if code is None:
+        return True
+    if code in (0, "0", 3000, "3000"):
+        return True
+    try:
+        return int(code) in (0, 3000)
+    except (TypeError, ValueError):
+        return str(code).strip().lower() in ("success", "ok")
+
+
+def _extract_volcengine_audio_b64(payload: dict[str, Any]) -> str:
+    data = payload.get("data")
+    if isinstance(data, str) and data.strip():
+        return data.strip()
+    if isinstance(data, dict):
+        for key in ("audio", "content", "binary", "b64"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+class VolcengineTTSProvider:
+    """
+    火山引擎「豆包」在线语音合成（OpenSpeech HTTP TTS）。
+
+    默认地址：https://openspeech.bytedance.com/api/v1/tts
+    鉴权：控制台 AppID + Token；Token 同时放在 JSON 与 ``Authorization: Bearer`` 头中。
+    """
+
+    def __init__(self, *, voice_id: str, tts_rate: float = 1.0) -> None:
+        self.voice_id = voice_id
+        self.tts_rate = _clamp_tts_rate(tts_rate)
+
+    def synthesize_to_file(self, *, text: str, output_file: Path) -> None:
+        appid = _volc_appid()
+        token = _volc_token()
+        if not appid or not token:
+            raise VoiceGenerationError(
+                "Volcengine / 豆包凭据未配置。请设置环境变量 NOTE2VIDEO_VOLC_APPID、NOTE2VIDEO_VOLC_TOKEN（或 VOLC_TOKEN），"
+                "或在菜单「设置 → TTS Provider…」中选择火山引擎/豆包并保存 App ID 与 Access Token。"
+            )
+
+        import uuid
+
+        temp_audio = output_file.with_suffix(".volc.mp3")
+        url = _volc_base_url()
+        is_v3_streaming = "/api/v3/tts/unidirectional" in url
+        # Volc speed ratio is typically 0.8-1.2; map our multiplier directly but clamp.
+        speed_ratio = max(0.5, min(2.0, float(self.tts_rate)))
+        body = {
+            "app": {"appid": appid, "token": token, "cluster": _volc_cluster()},
+            "user": {"uid": "note2video"},
+            "audio": {
+                "voice_type": self.voice_id,
+                "encoding": "mp3",
+                "speed_ratio": speed_ratio,
+                "volume_ratio": 1.0,
+                "pitch_ratio": 1.0,
+            },
+            "request": {
+                "reqid": str(uuid.uuid4()),
+                "text": text,
+                "text_type": "plain",
+                "operation": "query",
+                "with_frontend": 1,
+                "frontend_type": "unitTson",
+            },
+        }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            # Some V3 docs/examples use X-Api-* style headers.
+            "X-Api-App-Id": appid,
+            "X-Api-Access-Key": token,
+        }
+
+        if is_v3_streaming:
+            rid = _volc_resource_id()
+            if not rid:
+                raise VoiceGenerationError(
+                    "豆包/火山 V3 TTS 需要 Resource-Id，但当前未配置。"
+                    "请在「设置 → TTS Provider…」里填写 Resource-Id（或设置 NOTE2VIDEO_VOLC_RESOURCE_ID）。"
+                )
+            headers["Resource-Id"] = rid
+            headers["X-Api-Resource-Id"] = rid
+            audio_bytes = _http_post_sse_collect_audio_bytes(
+                url,
+                headers=headers,
+                body=body,
+                timeout_s=_volc_timeout_s(),
+            )
+            if not audio_bytes:
+                raise VoiceGenerationError("Volcengine V3 TTS returned empty audio.")
+            temp_audio.write_bytes(audio_bytes)
+        else:
+            payload = _http_post_json(
+                url,
+                headers=headers,
+                body=body,
+                timeout_s=_volc_timeout_s(),
+            )
+            code = payload.get("code")
+            if not _volc_tts_success(code):
+                raise VoiceGenerationError(
+                    f"Volcengine TTS failed: code={code!r} message={payload.get('message')!r}"
+                )
+            b64 = _extract_volcengine_audio_b64(payload)
+            if not b64:
+                raise VoiceGenerationError("Volcengine TTS returned empty audio.")
+            try:
+                temp_audio.write_bytes(base64.b64decode(b64))
+            except Exception as exc:
+                raise VoiceGenerationError("Volcengine TTS returned invalid base64 audio.") from exc
+        try:
+            _convert_audio_to_wav(temp_audio=temp_audio, output_file=output_file)
+        finally:
+            if temp_audio.exists():
+                try:
+                    temp_audio.unlink()
+                except OSError:
+                    pass
+
+
+# Curated voice_type samples for 豆包/火山「在线语音合成」. There is no stable list-voices HTTP API
+# wired here; the console / 文档「发音人参数列表」 is authoritative. See also volcengine.com/docs/6561/97465 .
+_VOLC_VOICE_TYPE_SAMPLES: list[tuple[str, str, str, str]] = [
+    # (voice_type, locale, gender, display_name)
+    ("BV700_streaming", "zh-CN", "", "BV700_streaming（文档常见）"),
+    ("BV701_streaming", "zh-CN", "", "BV701_streaming（文档常见）"),
+    ("BV700_V2_streaming", "zh-CN", "", "灿灿 2.0 · BV700_V2_streaming"),
+    ("BV705_streaming", "zh-CN", "", "阳阳 · BV705_streaming"),
+    ("BV123_streaming", "zh-CN", "", "阳光青年 · BV123_streaming"),
+    ("BV120_streaming", "zh-CN", "", "反卷青年 · BV120_streaming"),
+    ("BV119_streaming", "zh-CN", "", "通用女婿 · BV119_streaming"),
+    ("BV115_streaming", "zh-CN", "", "古风少御 · BV115_streaming"),
+    ("BV107_streaming", "zh-CN", "", "霸道少爷 · BV107_streaming"),
+    ("BV100_streaming", "zh-CN", "", "质朴青年 · BV100_streaming"),
+    ("BV104_streaming", "zh-CN", "", "温柔淑女 · BV104_streaming"),
+    ("BV004_streaming", "zh-CN", "", "开朗青年 · BV004_streaming"),
+    ("BV113_streaming", "zh-CN", "", "甜宠少御 · BV113_streaming"),
+    ("BV102_streaming", "zh-CN", "", "儒雅青年 · BV102_streaming"),
+    ("BV405_streaming", "zh-CN", "", "甜美小源 · BV405_streaming"),
+    ("BV007_streaming", "zh-CN", "Female", "亲切女声 · BV007_streaming"),
+    ("BV009_streaming", "zh-CN", "Female", "知性女声 · BV009_streaming"),
+    ("BV419_streaming", "zh-CN", "", "丞丞 · BV419_streaming"),
+    ("BV415_streaming", "zh-CN", "", "彤彤 · BV415_streaming"),
+    ("BV008_streaming", "zh-CN", "Male", "亲切男声 · BV008_streaming"),
+    ("BV408_streaming", "zh-CN", "Male", "译制片男声 · BV408_streaming"),
+    ("BV426_streaming", "zh-CN", "", "懒小羊 · BV426_streaming"),
+    ("BV428_streaming", "zh-CN", "Female", "清新文艺女声 · BV428_streaming"),
+    ("BV403_streaming", "zh-CN", "Female", "励志女声 · BV403_streaming"),
+    ("BV158_streaming", "zh-CN", "", "睿智老者 · BV158_streaming"),
+    ("BV157_streaming", "zh-CN", "Female", "慈爱奶奶 · BV157_streaming"),
+    ("BR001_streaming", "zh-CN", "", "说唱小哥 · BR001_streaming"),
+    ("BV410_streaming", "zh-CN", "Male", "活力解说男声 · BV410_streaming"),
+    ("BV411_streaming", "zh-CN", "Male", "影视解说小帅 · BV411_streaming"),
+    ("BV437_streaming", "zh-CN", "Male", "解说小帅多情感 · BV437_streaming"),
+    ("BV412_streaming", "zh-CN", "Female", "影视解说小美 · BV412_streaming"),
+    ("BV159_streaming", "zh-CN", "", "花花公子 · BV159_streaming"),
+    ("BV418_streaming", "zh-CN", "Female", "直播一姐 · BV418_streaming"),
+    ("BV142_streaming", "zh-CN", "Male", "沉稳解说男声 · BV142_streaming"),
+    ("BV143_streaming", "zh-CN", "", "潇洒青年 · BV143_streaming"),
+    (
+        "zh_female_shuangkuaisisi_moon_bigtts",
+        "zh-CN",
+        "Female",
+        "双快思思 · zh_female_shuangkuaisisi_moon_bigtts",
+    ),
+]
+
+
+def _list_volcengine_voices(*, keyword: str = "") -> list[dict[str, Any]]:
+    samples = [
+        {
+            "provider": "volcengine",
+            "name": vid,
+            "locale": loc,
+            "gender": gender,
+            "display_name": label,
+        }
+        for vid, loc, gender, label in _VOLC_VOICE_TYPE_SAMPLES
+    ]
+    kw = keyword.strip().lower()
+    if not kw:
+        return samples
+    out: list[dict[str, Any]] = []
+    for it in samples:
+        hay = " ".join(str(v) for v in it.values()).lower()
+        if kw in hay:
+            out.append(it)
+    return out
+
 def _list_edge_voices(*, keyword: str = "") -> list[dict[str, Any]]:
     try:
         import edge_tts
@@ -688,6 +936,56 @@ def _http_post_json(url: str, *, headers: dict[str, str], body: dict[str, Any], 
     if not isinstance(payload, dict):
         raise VoiceGenerationError("MiniMax response is not a JSON object.")
     return payload
+
+
+def _http_post_sse_collect_audio_bytes(
+    url: str, *, headers: dict[str, str], body: dict[str, Any], timeout_s: float
+) -> bytes:
+    """
+    Handle V3 unidirectional TTS which may stream JSON events (SSE / chunked).
+
+    We parse ``data: {...}`` lines, base64-decode the ``data`` field, and append bytes.
+    """
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(url=url, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            buf = bytearray()
+            for raw_line in resp:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith(b"data:"):
+                    line = line[5:].strip()
+                # Some servers may send plain JSON per line.
+                try:
+                    obj = json.loads(line.decode("utf-8", errors="replace"))
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                header = obj.get("header")
+                if isinstance(header, dict):
+                    code = header.get("code")
+                    # 0 typically means OK; treat others as errors.
+                    if code not in (0, "0", None):
+                        msg = header.get("message") or ""
+                        raise VoiceGenerationError(f"Volcengine V3 TTS failed: {code} {msg}".strip())
+                chunk_b64 = obj.get("data")
+                if isinstance(chunk_b64, str) and chunk_b64.strip():
+                    try:
+                        buf.extend(base64.b64decode(chunk_b64))
+                    except Exception as exc:
+                        raise VoiceGenerationError("Volcengine V3 returned invalid base64 audio chunk.") from exc
+            return bytes(buf)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            detail = ""
+        raise VoiceGenerationError(f"HTTP {exc.code} from {url}: {detail}".strip()) from exc
+    except urllib.error.URLError as exc:
+        raise VoiceGenerationError(f"Failed to reach {url}: {exc}") from exc
 
 
 def _split_sentences(text: str) -> list[str]:

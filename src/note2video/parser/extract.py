@@ -197,6 +197,7 @@ def _extract_with_powerpoint(
     try:
         import pythoncom
         import win32com.client
+        import win32gui
     except ImportError as exc:  # pragma: no cover - environment specific
         raise PowerPointUnavailableError(
             "pywin32 is required for PowerPoint extraction on Windows."
@@ -206,16 +207,28 @@ def _extract_with_powerpoint(
     app = None
     presentation = None
 
+    def _hide_window() -> None:
+        """把 PowerPoint 主窗口移到屏幕外，防止闪烁，同时保持渲染正常。"""
+        try:
+            hwnd = win32gui.FindWindow("PPTFrameClass", None)
+            if hwnd:
+                # SWP_NOACTIVATE=0x0004：不激活窗口；把窗口移到屏幕左边很远的位置
+                win32gui.SetWindowPos(hwnd, None, -32000, 0, 0, 0, 0x0004 | 0x0001)
+        except Exception:
+            pass
+
     try:
         app = win32com.client.DispatchEx("PowerPoint.Application")
-        # Some PowerPoint versions reject hiding the application window here.
-        app.Visible = 1
+        app.Visible = 1  # 必须可见，Export 才能正确渲染
+        app.DisplayAlerts = 2  # ppAlertsNone，不弹对话框
         presentation = app.Presentations.Open(
             str(input_path.resolve()),
             ReadOnly=1,
             Untitled=0,
             WithWindow=0,
         )
+        # 打开后立即藏窗口
+        _hide_window()
 
         records: list[dict[str, Any]] = []
         for index, slide in enumerate(presentation.Slides, start=1):
