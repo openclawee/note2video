@@ -32,7 +32,7 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
         return {"segment_count": 5}
 
     def fake_render(project_dir, output_path=None, **kwargs):
-        calls.append(("render", project_dir, output_path, kwargs.get("subtitle_highlight_mode")))
+        calls.append(("render", project_dir, output_path, kwargs.get("subtitle_fade_in_ms")))
         return {"video": "video/output.mp4", "subtitles_burned": True, "mixed_audio": "audio/mixed.wav"}
 
     req = BuildRequest(
@@ -41,8 +41,6 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
         pages="1-3",
         tts_provider="pyttsx3",
         subtitle_color=None,
-        subtitle_highlight_mode=None,
-        subtitle_highlight_color=None,
     )
     run_build_pipeline(
         req,

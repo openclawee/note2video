@@ -242,7 +242,9 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
     assert manifest["outputs"]["video"] == "video/output.mp4"
     assert (project_dir / "video" / "output.mp4").exists()
     first_command = commands[0]
-    assert "fps=30,format=yuv420p" in first_command
+    # 1080p standardization filter is applied before fps/format.
+    assert any("fps=30,format=yuv420p" in str(x) for x in first_command)
+    assert any("scale=1920:1080" in str(x) for x in first_command)
     assert "vfr" not in first_command
     assert not (project_dir / "video" / "video_only.mp4").exists()
     assert not (project_dir / "video" / "slides.ffconcat").exists()

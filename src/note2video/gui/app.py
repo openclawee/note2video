@@ -10,15 +10,6 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
-from note2video.app.publish_service import (
-    PublishRequest,
-    build_publish_request,
-    check_publish_auth_status,
-    last_publish_status_lines,
-    perform_publish_execution,
-    perform_publish_login,
-    write_publish_record,
-)
 from note2video.app.pipeline_service import (
     BuildRequest,
     ExtractRequest,
@@ -293,8 +284,6 @@ class JobConfig:
     tts_rate: float
     minimax_base_url: str | None = None
     subtitle_color: str | None = None
-    subtitle_highlight_mode: str | None = None
-    subtitle_highlight_color: str | None = None
     subtitle_fade_in_ms: int | None = None
     subtitle_fade_out_ms: int | None = None
     subtitle_scale_from: int | None = None
@@ -397,6 +386,155 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
     return 0
 
 
+def _run_extract_or_build_subprocess(config: JobConfig, emit_log) -> int:
+    """
+    Run extract/build via a child process.
+
+    On Windows, PowerPoint export uses COM automation (pywin32). Running COM in a Qt worker
+    thread can crash the whole GUI process (0x80010108 / RPC errors). Spawning a child
+    process isolates COM and makes the GUI much more stable.
+    """
+    import subprocess
+
+    argv: list[str] = [sys.executable, "-m", "note2video.cli.main"]
+    if (config.mode or "").strip().lower() == "extract":
+        argv += [
+            "extract",
+            str(config.pptx_path),
+            "--out",
+            str(config.out_dir),
+            "--pages",
+            str(config.pages or "all"),
+            "--json",
+        ]
+    else:
+        argv += [
+            "build",
+            str(config.pptx_path),
+            "--out",
+            str(config.out_dir),
+            "--pages",
+            str(config.pages or "all"),
+            "--tts-provider",
+            str(config.tts_provider or "pyttsx3"),
+            "--voice",
+            str(config.voice_id or ""),
+            "--tts-rate",
+            str(float(config.tts_rate)),
+            "--bgm",
+            str(config.bgm_path or ""),
+            "--bgm-volume",
+            str(float(config.bgm_volume)),
+            "--bgm-fade-in",
+            str(float(config.bgm_fade_in_s)),
+            "--bgm-fade-out",
+            str(float(config.bgm_fade_out_s)),
+            "--narration-volume",
+            str(float(config.narration_volume)),
+            "--subtitle-color",
+            str(config.subtitle_color or ""),
+            "--subtitle-font",
+            str(config.subtitle_font or ""),
+            "--subtitle-size",
+            str(int(config.subtitle_size or 0)),
+            "--subtitle-fade-in-ms",
+            str(int(config.subtitle_fade_in_ms or 80)),
+            "--subtitle-fade-out-ms",
+            str(int(config.subtitle_fade_out_ms or 120)),
+            "--subtitle-scale-from",
+            str(int(config.subtitle_scale_from or 100)),
+            "--subtitle-scale-to",
+            str(int(config.subtitle_scale_to or 104)),
+            "--subtitle-outline",
+            str(int(config.subtitle_outline or 1)),
+            "--subtitle-shadow",
+            str(int(config.subtitle_shadow or 0)),
+            "--json",
+        ]
+
+    emit_log("开始运行（子进程模式）…")
+    emit_log("command: " + " ".join(argv))
+
+    proc = subprocess.Popen(
+        argv,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            emit_log(line.rstrip("\n"))
+    finally:
+        try:
+            proc.stdout and proc.stdout.close()
+        except Exception:
+            pass
+    return int(proc.wait())
+
+
+def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
+    argv: list[str] = [sys.executable, "-m", "note2video.cli.main"]
+    if (config.mode or "").strip().lower() == "extract":
+        argv += [
+            "extract",
+            str(config.pptx_path),
+            "--out",
+            str(config.out_dir),
+            "--pages",
+            str(config.pages or "all"),
+            "--json",
+        ]
+        return argv
+
+    argv += [
+        "build",
+        str(config.pptx_path),
+        "--out",
+        str(config.out_dir),
+        "--pages",
+        str(config.pages or "all"),
+        "--tts-provider",
+        str(config.tts_provider or "pyttsx3"),
+        "--voice",
+        str(config.voice_id or ""),
+        "--tts-rate",
+        str(float(config.tts_rate)),
+        "--bgm",
+        str(config.bgm_path or ""),
+        "--bgm-volume",
+        str(float(config.bgm_volume)),
+        "--bgm-fade-in",
+        str(float(config.bgm_fade_in_s)),
+        "--bgm-fade-out",
+        str(float(config.bgm_fade_out_s)),
+        "--narration-volume",
+        str(float(config.narration_volume)),
+        "--subtitle-color",
+        str(config.subtitle_color or ""),
+        "--subtitle-font",
+        str(config.subtitle_font or ""),
+        "--subtitle-size",
+        str(int(config.subtitle_size or 0)),
+        "--subtitle-fade-in-ms",
+        str(int(config.subtitle_fade_in_ms or 80)),
+        "--subtitle-fade-out-ms",
+        str(int(config.subtitle_fade_out_ms or 120)),
+        "--subtitle-scale-from",
+        str(int(config.subtitle_scale_from or 100)),
+        "--subtitle-scale-to",
+        str(int(config.subtitle_scale_to or 104)),
+        "--subtitle-outline",
+        str(int(config.subtitle_outline or 1)),
+        "--subtitle-shadow",
+        str(int(config.subtitle_shadow or 0)),
+        "--json",
+    ]
+    return argv
+
+
 def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
     return BuildRequest(
         input_file=str(config.pptx_path),
@@ -411,8 +549,6 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
         bgm_fade_in_s=float(config.bgm_fade_in_s),
         bgm_fade_out_s=float(config.bgm_fade_out_s),
         subtitle_color=config.subtitle_color,
-        subtitle_highlight_mode=config.subtitle_highlight_mode,
-        subtitle_highlight_color=config.subtitle_highlight_color,
         subtitle_fade_in_ms=int(config.subtitle_fade_in_ms or 80),
         subtitle_fade_out_ms=int(config.subtitle_fade_out_ms or 120),
         subtitle_scale_from=int(config.subtitle_scale_from or 100),
@@ -425,20 +561,14 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
 
 
 def _build_worker(QtCore, config: JobConfig):
+    # Backward shim: worker-based pipeline runner has been replaced by QProcess.
     class Worker(QtCore.QObject):
         log = QtCore.Signal(str)
         done = QtCore.Signal(int)
 
         def run(self) -> None:
-            # Enable fault handler in this thread to capture crashes/exceptions.
-            import faulthandler
-            faulthandler.enable()
-            try:
-                exit_code = _run_extract_or_build(config, self.log.emit)
-            except Exception:
-                self.log.emit(traceback.format_exc())
-                exit_code = 1
-            self.done.emit(exit_code)
+            self.log.emit("Worker-based pipeline runner is deprecated; GUI uses QProcess now.")
+            self.done.emit(1)
 
     return Worker()
 
@@ -480,9 +610,7 @@ def _build_ui(QtWidgets, QtCore):
             self._preview_web_available: bool = False
             self._pipeline_busy = False
             self._pipeline_stage_label: str = ""
-            self._publish_busy = False
-            self._publish_timer: Any = None
-            self._publish_last_payload: dict[str, Any] | None = None
+            self._pipeline_proc: Any = None
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
@@ -687,31 +815,6 @@ def _build_ui(QtWidgets, QtCore):
             render_grid.addWidget(QtWidgets.QLabel("字体大小"), 2, 0)
             render_grid.addWidget(self.subtitle_size_spin, 2, 1)
 
-            # Subtitle effects / highlight
-            self.subtitle_highlight_mode_combo = QtWidgets.QComboBox()
-            self.subtitle_highlight_mode_combo.addItem("无", "none")
-            self.subtitle_highlight_mode_combo.addItem("整句高亮", "line")
-            self.subtitle_highlight_mode_combo.addItem("逐词高亮（Edge）", "word")
-            self.subtitle_highlight_mode_combo.setToolTip("高亮模式：整句/逐词。逐词需要 edge-tts 并生成 word_timings。")
-            render_grid.addWidget(QtWidgets.QLabel("高亮模式"), 3, 0)
-            render_grid.addWidget(self.subtitle_highlight_mode_combo, 3, 1)
-
-            self.subtitle_highlight_color_value = QtWidgets.QLineEdit()
-            self.subtitle_highlight_color_value.setReadOnly(True)
-            self.subtitle_highlight_color_value.setPlaceholderText("默认")
-            self.subtitle_highlight_color_btn = QtWidgets.QPushButton("选择…")
-            self.subtitle_highlight_color_clear_btn = QtWidgets.QPushButton("清除")
-            self.subtitle_highlight_color_preview = QtWidgets.QLabel("      ")
-            self.subtitle_highlight_color_preview.setToolTip("高亮颜色预览")
-            self.subtitle_highlight_color_preview.setStyleSheet("background: transparent; border: 1px solid #999;")
-            hi_row = QtWidgets.QHBoxLayout()
-            hi_row.addWidget(self.subtitle_highlight_color_preview)
-            hi_row.addWidget(self.subtitle_highlight_color_value, 1)
-            hi_row.addWidget(self.subtitle_highlight_color_btn)
-            hi_row.addWidget(self.subtitle_highlight_color_clear_btn)
-            render_grid.addWidget(QtWidgets.QLabel("高亮颜色"), 4, 0)
-            render_grid.addLayout(hi_row, 4, 1, 1, 3)
-
             self.subtitle_fade_in_spin = QtWidgets.QSpinBox()
             self.subtitle_fade_in_spin.setRange(0, 5000)
             self.subtitle_fade_in_spin.setValue(80)
@@ -720,12 +823,12 @@ def _build_ui(QtWidgets, QtCore):
             self.subtitle_fade_out_spin.setRange(0, 5000)
             self.subtitle_fade_out_spin.setValue(120)
             self.subtitle_fade_out_spin.setToolTip("逐句消失（淡出）时长，单位 ms。")
-            render_grid.addWidget(QtWidgets.QLabel("淡入/淡出(ms)"), 5, 0)
+            render_grid.addWidget(QtWidgets.QLabel("淡入/淡出(ms)"), 3, 0)
             fade_row = QtWidgets.QHBoxLayout()
             fade_row.addWidget(self.subtitle_fade_in_spin)
             fade_row.addWidget(QtWidgets.QLabel("/"))
             fade_row.addWidget(self.subtitle_fade_out_spin)
-            render_grid.addLayout(fade_row, 5, 1)
+            render_grid.addLayout(fade_row, 3, 1)
 
             self.subtitle_scale_from_spin = QtWidgets.QSpinBox()
             self.subtitle_scale_from_spin.setRange(50, 200)
@@ -733,12 +836,12 @@ def _build_ui(QtWidgets, QtCore):
             self.subtitle_scale_to_spin = QtWidgets.QSpinBox()
             self.subtitle_scale_to_spin.setRange(50, 200)
             self.subtitle_scale_to_spin.setValue(104)
-            render_grid.addWidget(QtWidgets.QLabel("缩放(%)"), 6, 0)
+            render_grid.addWidget(QtWidgets.QLabel("缩放(%)"), 4, 0)
             scale_row = QtWidgets.QHBoxLayout()
             scale_row.addWidget(self.subtitle_scale_from_spin)
             scale_row.addWidget(QtWidgets.QLabel("→"))
             scale_row.addWidget(self.subtitle_scale_to_spin)
-            render_grid.addLayout(scale_row, 6, 1)
+            render_grid.addLayout(scale_row, 4, 1)
 
             self.subtitle_outline_spin = QtWidgets.QSpinBox()
             self.subtitle_outline_spin.setRange(0, 20)
@@ -774,19 +877,17 @@ def _build_ui(QtWidgets, QtCore):
             self.progress.setFormat("就绪")
             right.addWidget(self.progress)
 
-            # --- Preview player (embedded browser) ---
-            preview_group = QtWidgets.QGroupBox("试听播放器（内嵌）")
+            # --- Preview player ---
+            # NOTE: QtWebEngine is prone to native crashes on some Windows setups (0xC0000409).
+            # Keep the preview UX simple and stable: use system default player only.
+            preview_group = QtWidgets.QGroupBox("试听播放器")
             preview_v = QtWidgets.QVBoxLayout(preview_group)
             preview_hint = QtWidgets.QLabel(
-                "若系统默认播放器不稳定，可用内嵌浏览器播放（需要 QtWebEngine）。"
+                "使用系统默认播放器播放试听文件。"
             )
             preview_hint.setWordWrap(True)
             preview_hint.setStyleSheet("color: gray;")
             preview_v.addWidget(preview_hint)
-
-            self.preview_open_btn = QtWidgets.QPushButton("在内嵌播放器中打开最近一次试听")
-            self.preview_open_btn.setEnabled(False)
-            preview_v.addWidget(self.preview_open_btn)
 
             preview_actions = QtWidgets.QHBoxLayout()
             self.preview_play_system_btn = QtWidgets.QPushButton("播放（系统默认）")
@@ -797,23 +898,8 @@ def _build_ui(QtWidgets, QtCore):
             preview_actions.addWidget(self.preview_reveal_btn)
             preview_actions.addStretch(1)
             preview_v.addLayout(preview_actions)
-
-            try:
-                from PySide6.QtWebEngineWidgets import QWebEngineView  # type: ignore
-
-                self._preview_web_view = QWebEngineView()
-                self._preview_web_available = True
-                self._preview_web_view.setMinimumHeight(120)
-                preview_v.addWidget(self._preview_web_view)
-            except Exception:
-                self._preview_web_view = None
-                self._preview_web_available = False
-                missing = QtWidgets.QLabel(
-                    "当前环境未安装/无法加载 QtWebEngine，内嵌播放不可用；仍可用系统播放器播放。"
-                )
-                missing.setWordWrap(True)
-                missing.setStyleSheet("color: gray;")
-                preview_v.addWidget(missing)
+            self._preview_web_view = None
+            self._preview_web_available = False
 
             right.addWidget(preview_group)
 
@@ -821,150 +907,7 @@ def _build_ui(QtWidgets, QtCore):
             self.log.setReadOnly(True)
             right.addWidget(self.log, 1)
 
-            # --- Publish tab ---
-            publish_tab = QtWidgets.QWidget()
-            self.tabs.addTab(publish_tab, "发布")
-            publish_layout = QtWidgets.QVBoxLayout(publish_tab)
-
-            publish_account_group = QtWidgets.QGroupBox("账号与平台")
-            publish_account_grid = QtWidgets.QGridLayout(publish_account_group)
-            publish_account_grid.setColumnStretch(1, 1)
-            publish_account_grid.setColumnStretch(3, 1)
-            publish_layout.addWidget(publish_account_group)
-
-            self.publish_platform_combo = QtWidgets.QComboBox()
-            self.publish_platform_combo.addItem("抖音", "douyin")
-            self.publish_platform_combo.addItem("视频号", "channels")
-            publish_account_grid.addWidget(QtWidgets.QLabel("平台"), 0, 0)
-            publish_account_grid.addWidget(self.publish_platform_combo, 0, 1)
-
-            self.publish_method_combo = QtWidgets.QComboBox()
-            self.publish_method_combo.addItem("浏览器自动化（web）", "web")
-            self.publish_method_combo.addItem("开放 API（预留）", "api")
-            publish_account_grid.addWidget(QtWidgets.QLabel("方式"), 0, 2)
-            publish_account_grid.addWidget(self.publish_method_combo, 0, 3)
-
-            self.publish_auth_status_value = QtWidgets.QLabel("未检查")
-            self.publish_auth_status_value.setStyleSheet("color: gray;")
-            publish_account_grid.addWidget(QtWidgets.QLabel("登录状态"), 1, 0)
-            publish_account_grid.addWidget(self.publish_auth_status_value, 1, 1)
-
-            account_actions = QtWidgets.QHBoxLayout()
-            self.publish_login_btn = QtWidgets.QPushButton("登录 / 刷新登录")
-            self.publish_auth_status_btn = QtWidgets.QPushButton("检查登录状态")
-            account_actions.addWidget(self.publish_login_btn)
-            account_actions.addWidget(self.publish_auth_status_btn)
-            account_actions.addStretch(1)
-            publish_account_grid.addLayout(account_actions, 1, 2, 1, 2)
-
-            publish_content_group = QtWidgets.QGroupBox("发布内容")
-            publish_content_grid = QtWidgets.QGridLayout(publish_content_group)
-            publish_content_grid.setColumnStretch(1, 1)
-            publish_content_grid.setColumnStretch(3, 1)
-            publish_layout.addWidget(publish_content_group)
-
-            self.publish_video_source_combo = QtWidgets.QComboBox()
-            self.publish_video_source_combo.addItem("使用最近 Build 输出", "last_build")
-            self.publish_video_source_combo.addItem("手动选择视频", "manual")
-            publish_content_grid.addWidget(QtWidgets.QLabel("视频来源"), 0, 0)
-            publish_content_grid.addWidget(self.publish_video_source_combo, 0, 1)
-
-            self.publish_video_path_edit = QtWidgets.QLineEdit()
-            self.publish_video_path_btn = QtWidgets.QPushButton("选择…")
-            publish_video_row = QtWidgets.QHBoxLayout()
-            publish_video_row.addWidget(self.publish_video_path_edit, 1)
-            publish_video_row.addWidget(self.publish_video_path_btn)
-            publish_content_grid.addWidget(QtWidgets.QLabel("视频文件"), 1, 0)
-            publish_content_grid.addLayout(publish_video_row, 1, 1, 1, 3)
-
-            self.publish_title_edit = QtWidgets.QLineEdit()
-            self.publish_title_edit.setPlaceholderText("视频标题（建议简洁明确）")
-            publish_content_grid.addWidget(QtWidgets.QLabel("标题"), 2, 0)
-            publish_content_grid.addWidget(self.publish_title_edit, 2, 1, 1, 3)
-
-            self.publish_topics_edit = QtWidgets.QLineEdit()
-            self.publish_topics_edit.setPlaceholderText("话题标签，逗号分隔。例如：AI,教学,效率")
-            publish_content_grid.addWidget(QtWidgets.QLabel("话题"), 3, 0)
-            publish_content_grid.addWidget(self.publish_topics_edit, 3, 1, 1, 3)
-
-            self.publish_description_edit = QtWidgets.QPlainTextEdit()
-            self.publish_description_edit.setPlaceholderText("描述 / 简介（可选）")
-            self.publish_description_edit.setMinimumHeight(72)
-            publish_content_grid.addWidget(QtWidgets.QLabel("描述"), 4, 0)
-            publish_content_grid.addWidget(self.publish_description_edit, 4, 1, 1, 3)
-
-            self.publish_cover_path_edit = QtWidgets.QLineEdit()
-            self.publish_cover_path_btn = QtWidgets.QPushButton("选择…")
-            publish_cover_row = QtWidgets.QHBoxLayout()
-            publish_cover_row.addWidget(self.publish_cover_path_edit, 1)
-            publish_cover_row.addWidget(self.publish_cover_path_btn)
-            publish_content_grid.addWidget(QtWidgets.QLabel("封面图"), 5, 0)
-            publish_content_grid.addLayout(publish_cover_row, 5, 1, 1, 3)
-
-            self.publish_visibility_combo = QtWidgets.QComboBox()
-            self.publish_visibility_combo.addItem("公开", "public")
-            self.publish_visibility_combo.addItem("仅自己可见", "private")
-            publish_content_grid.addWidget(QtWidgets.QLabel("可见性"), 6, 0)
-            publish_content_grid.addWidget(self.publish_visibility_combo, 6, 1)
-
-            self.publish_schedule_chk = QtWidgets.QCheckBox("定时发布")
-            self.publish_schedule_time = QtWidgets.QDateTimeEdit()
-            self.publish_schedule_time.setCalendarPopup(True)
-            self.publish_schedule_time.setDateTime(QtCore.QDateTime.currentDateTime())
-            self.publish_schedule_time.setEnabled(False)
-            schedule_row = QtWidgets.QHBoxLayout()
-            schedule_row.addWidget(self.publish_schedule_chk)
-            schedule_row.addWidget(self.publish_schedule_time, 1)
-            publish_content_grid.addLayout(schedule_row, 6, 2, 1, 2)
-
-            publish_exec_group = QtWidgets.QGroupBox("发布执行")
-            publish_exec_v = QtWidgets.QVBoxLayout(publish_exec_group)
-            publish_layout.addWidget(publish_exec_group)
-
-            publish_flags_row = QtWidgets.QHBoxLayout()
-            self.publish_dry_run_chk = QtWidgets.QCheckBox("Dry-run（填表不点发布）")
-            self.publish_auto_confirm_chk = QtWidgets.QCheckBox("自动确认发布")
-            publish_flags_row.addWidget(self.publish_dry_run_chk)
-            publish_flags_row.addWidget(self.publish_auto_confirm_chk)
-            publish_flags_row.addStretch(1)
-            publish_exec_v.addLayout(publish_flags_row)
-
-            publish_actions_row = QtWidgets.QHBoxLayout()
-            self.publish_start_btn = QtWidgets.QPushButton("开始发布")
-            self.publish_stop_btn = QtWidgets.QPushButton("停止当前发布")
-            self.publish_status_btn = QtWidgets.QPushButton("查询发布状态")
-            self.publish_retry_btn = QtWidgets.QPushButton("重试上次发布")
-            self.publish_stop_btn.setEnabled(False)
-            publish_actions_row.addWidget(self.publish_start_btn)
-            publish_actions_row.addWidget(self.publish_stop_btn)
-            publish_actions_row.addWidget(self.publish_status_btn)
-            publish_actions_row.addWidget(self.publish_retry_btn)
-            publish_actions_row.addStretch(1)
-            publish_exec_v.addLayout(publish_actions_row)
-
-            self.publish_progress = QtWidgets.QProgressBar()
-            self.publish_progress.setRange(0, 5)
-            self.publish_progress.setValue(0)
-            self.publish_progress.setFormat("就绪")
-            publish_exec_v.addWidget(self.publish_progress)
-
-            publish_result_group = QtWidgets.QGroupBox("发布结果")
-            publish_result_v = QtWidgets.QVBoxLayout(publish_result_group)
-            publish_layout.addWidget(publish_result_group, 1)
-
-            self.publish_result_table = QtWidgets.QTableWidget(0, 6)
-            self.publish_result_table.setHorizontalHeaderLabels(["时间", "平台", "标题", "状态", "发布ID", "备注"])
-            self.publish_result_table.verticalHeader().setVisible(False)
-            self.publish_result_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-            self.publish_result_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-            self.publish_result_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
-            publish_result_v.addWidget(self.publish_result_table)
-
-            self.publish_log = QtWidgets.QPlainTextEdit()
-            self.publish_log.setReadOnly(True)
-            self.publish_log.setPlaceholderText("发布流程日志")
-            publish_result_v.addWidget(self.publish_log, 1)
-
+            # Legacy thread-based runner removed; keep placeholders for old state checks.
             self._thread = None
             self._worker = None
 
@@ -977,27 +920,13 @@ def _build_ui(QtWidgets, QtCore):
             self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
             self.voice_refresh_btn.clicked.connect(self._refresh_voice_list)
             self.voice_preview_btn.clicked.connect(self._preview_voice)
-            self.preview_open_btn.clicked.connect(self._open_last_preview_in_web)
             self.preview_play_system_btn.clicked.connect(self._play_last_preview_system)
             self.preview_reveal_btn.clicked.connect(self._reveal_last_preview)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
-            self.subtitle_highlight_color_btn.clicked.connect(self._pick_subtitle_highlight_color)
-            self.subtitle_highlight_color_clear_btn.clicked.connect(self._clear_subtitle_highlight_color)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
-            self.publish_video_path_btn.clicked.connect(self._pick_publish_video)
-            self.publish_cover_path_btn.clicked.connect(self._pick_publish_cover)
-            self.publish_video_source_combo.currentIndexChanged.connect(self._toggle_publish_manual_video_enabled)
-            self.publish_schedule_chk.toggled.connect(self.publish_schedule_time.setEnabled)
-            self.publish_login_btn.clicked.connect(self._publish_login)
-            self.publish_auth_status_btn.clicked.connect(self._publish_check_auth_status)
-            self.publish_start_btn.clicked.connect(self._start_publish)
-            self.publish_stop_btn.clicked.connect(self._stop_publish)
-            self.publish_status_btn.clicked.connect(self._publish_check_last_status)
-            self.publish_retry_btn.clicked.connect(self._publish_retry_last)
 
             self._restore_gui_state_from_config()
-            self._toggle_publish_manual_video_enabled()
 
         def closeEvent(self, event) -> None:  # noqa: N802
             try:
@@ -1047,15 +976,6 @@ def _build_ui(QtWidgets, QtCore):
 
             subc = _get_str("subtitle_color", "").strip()
             self._set_subtitle_color(subc or None)
-            hic = _get_str("subtitle_highlight_color", "").strip()
-            self._set_subtitle_highlight_color(hic or None)
-            try:
-                hm = _get_str("subtitle_highlight_mode", "none").strip().lower() or "none"
-                idx = self.subtitle_highlight_mode_combo.findData(hm)
-                if idx >= 0:
-                    self.subtitle_highlight_mode_combo.setCurrentIndex(idx)
-            except Exception:
-                pass
             try:
                 self.subtitle_fade_in_spin.setValue(int(st.get("subtitle_fade_in_ms", self.subtitle_fade_in_spin.value())))
             except Exception:
@@ -1120,40 +1040,6 @@ def _build_ui(QtWidgets, QtCore):
             except Exception:
                 pass
 
-            platform = _get_str("publish_platform", "douyin").strip() or "douyin"
-            idx = self.publish_platform_combo.findData(platform)
-            self.publish_platform_combo.setCurrentIndex(idx if idx >= 0 else 0)
-
-            method = _get_str("publish_method", "web").strip() or "web"
-            idx = self.publish_method_combo.findData(method)
-            self.publish_method_combo.setCurrentIndex(idx if idx >= 0 else 0)
-
-            source = _get_str("publish_video_source", "last_build").strip() or "last_build"
-            idx = self.publish_video_source_combo.findData(source)
-            self.publish_video_source_combo.setCurrentIndex(idx if idx >= 0 else 0)
-            self.publish_video_path_edit.setText(_get_str("publish_video_path", "").strip())
-            self.publish_title_edit.setText(_get_str("publish_title", "").strip())
-            self.publish_topics_edit.setText(_get_str("publish_topics", "").strip())
-            self.publish_description_edit.setPlainText(_get_str("publish_description", ""))
-            self.publish_cover_path_edit.setText(_get_str("publish_cover_path", "").strip())
-            self.publish_auth_status_value.setText(_get_str("publish_auth_status", "未检查"))
-
-            visibility = _get_str("publish_visibility", "public").strip() or "public"
-            idx = self.publish_visibility_combo.findData(visibility)
-            self.publish_visibility_combo.setCurrentIndex(idx if idx >= 0 else 0)
-
-            schedule_enabled = _get_bool("publish_schedule_enabled", False)
-            self.publish_schedule_chk.setChecked(schedule_enabled)
-            schedule_raw = _get_str("publish_schedule_time", "").strip()
-            if schedule_raw:
-                dt = self._QtCore.QDateTime.fromString(schedule_raw, self._publish_datetime_format())
-                if dt.isValid():
-                    self.publish_schedule_time.setDateTime(dt)
-            self.publish_schedule_time.setEnabled(schedule_enabled)
-
-            self.publish_dry_run_chk.setChecked(_get_bool("publish_dry_run", True))
-            self.publish_auto_confirm_chk.setChecked(_get_bool("publish_auto_confirm", False))
-
             try:
                 active_tab = int(st.get("active_tab", 0) or 0)
                 if 0 <= active_tab < self.tabs.count():
@@ -1184,8 +1070,6 @@ def _build_ui(QtWidgets, QtCore):
                     "voice_id": self._current_voice_id(),
                     "tts_rate": float(self.tts_rate_spin.value()),
                     "subtitle_color": self.subtitle_color_value.text().strip(),
-                    "subtitle_highlight_mode": str(self.subtitle_highlight_mode_combo.currentData() or "none"),
-                    "subtitle_highlight_color": self.subtitle_highlight_color_value.text().strip(),
                     "subtitle_fade_in_ms": int(self.subtitle_fade_in_spin.value()),
                     "subtitle_fade_out_ms": int(self.subtitle_fade_out_spin.value()),
                     "subtitle_scale_from": int(self.subtitle_scale_from_spin.value()),
@@ -1200,20 +1084,6 @@ def _build_ui(QtWidgets, QtCore):
                     "bgm_fade_in_s": float(self.bgm_fade_in_spin.value()),
                     "bgm_fade_out_s": float(self.bgm_fade_out_spin.value()),
                     "active_tab": int(self.tabs.currentIndex()),
-                    "publish_platform": str(self.publish_platform_combo.currentData() or "douyin"),
-                    "publish_method": str(self.publish_method_combo.currentData() or "web"),
-                    "publish_video_source": str(self.publish_video_source_combo.currentData() or "last_build"),
-                    "publish_video_path": self.publish_video_path_edit.text().strip(),
-                    "publish_title": self.publish_title_edit.text().strip(),
-                    "publish_topics": self.publish_topics_edit.text().strip(),
-                    "publish_description": self.publish_description_edit.toPlainText().strip(),
-                    "publish_cover_path": self.publish_cover_path_edit.text().strip(),
-                    "publish_visibility": str(self.publish_visibility_combo.currentData() or "public"),
-                    "publish_schedule_enabled": bool(self.publish_schedule_chk.isChecked()),
-                    "publish_schedule_time": self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
-                    "publish_dry_run": bool(self.publish_dry_run_chk.isChecked()),
-                    "publish_auto_confirm": bool(self.publish_auto_confirm_chk.isChecked()),
-                    "publish_auth_status": self.publish_auth_status_value.text().strip(),
                     "window_w": int(self.size().width()),
                     "window_h": int(self.size().height()),
                 }
@@ -1249,35 +1119,6 @@ def _build_ui(QtWidgets, QtCore):
 
         def _clear_subtitle_color(self) -> None:
             self._set_subtitle_color(None)
-
-        def _set_subtitle_highlight_color(self, color_hex: str | None) -> None:
-            c = (color_hex or "").strip()
-            if not c:
-                self.subtitle_highlight_color_value.setText("")
-                self.subtitle_highlight_color_preview.setStyleSheet("background: transparent; border: 1px solid #999;")
-                return
-            if not c.startswith("#"):
-                c = "#" + c
-            self.subtitle_highlight_color_value.setText(c)
-            self.subtitle_highlight_color_preview.setStyleSheet(f"background: {c}; border: 1px solid #333;")
-
-        def _pick_subtitle_highlight_color(self) -> None:
-            QtWidgets = self._QtWidgets
-            try:
-                from PySide6.QtGui import QColor
-            except Exception:
-                QColor = None  # type: ignore
-            current = self.subtitle_highlight_color_value.text().strip() or "#FFD400"
-            dlg = QtWidgets.QColorDialog(self)
-            dlg.setOption(QtWidgets.QColorDialog.ColorDialogOption.ShowAlphaChannel, False)
-            if QColor is not None:
-                dlg.setCurrentColor(QColor(current))
-            if dlg.exec():
-                col = dlg.currentColor()
-                self._set_subtitle_highlight_color(col.name().upper())
-
-        def _clear_subtitle_highlight_color(self) -> None:
-            self._set_subtitle_highlight_color(None)
 
         def _pick_bgm(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1396,7 +1237,7 @@ def _build_ui(QtWidgets, QtCore):
             if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听正在进行中，请稍候…")
                 return
-            if self._pipeline_busy or self._thread is not None:
+            if self._pipeline_busy:
                 self._append_log("当前有任务在运行，请稍后再试听。")
                 return
 
@@ -1537,15 +1378,9 @@ def _build_ui(QtWidgets, QtCore):
                     size = -1
                 self._append_log(f"试听音频已生成：{p}  ({size} bytes)")
                 self._last_preview_path = p
-                self.preview_open_btn.setEnabled(bool(self._preview_web_available))
                 self.preview_play_system_btn.setEnabled(True)
                 self.preview_reveal_btn.setEnabled(True)
-                if self._preview_web_available and self._preview_web_view is not None:
-                    self._load_preview_in_web(p, autoplay=False)
-                    # Player is ready; user can hit play or "打开最近一次试听" to autoplay.
-                    self._append_log("内嵌播放器已加载试听文件，可在右侧播放器中播放。")
-                else:
-                    self._append_log("提示：QtWebEngine 不可用，可用右侧按钮用系统默认播放器播放。")
+                self._append_log("提示：可用右侧按钮用系统默认播放器播放 / 定位文件。")
 
             timer.timeout.connect(_finish_preview)
             timer.start()
@@ -1648,17 +1483,6 @@ def _build_ui(QtWidgets, QtCore):
         def _append_log(self, text: str) -> None:
             self.log.appendPlainText(text.rstrip("\n"))
 
-        def _open_last_preview_in_web(self) -> None:
-            QtWidgets = self._QtWidgets
-            p = self._last_preview_path
-            if not p or not p.exists():
-                QtWidgets.QMessageBox.information(self, "试听", "还没有可播放的试听文件。")
-                return
-            if not self._preview_web_available or self._preview_web_view is None:
-                QtWidgets.QMessageBox.information(self, "试听", "内嵌浏览器播放不可用（缺少 QtWebEngine）。")
-                return
-            self._load_preview_in_web(p, autoplay=True)
-
         def _play_last_preview_system(self) -> None:
             QtWidgets = self._QtWidgets
             p = self._last_preview_path
@@ -1674,41 +1498,7 @@ def _build_ui(QtWidgets, QtCore):
                 QtWidgets.QMessageBox.information(self, "试听", "还没有可播放的试听文件。")
                 return
             self._reveal_preview_file(p)
-
-        def _load_preview_in_web(self, path: Path, *, autoplay: bool) -> None:
-            view = self._preview_web_view
-            if view is None:
-                return
-            try:
-                from PySide6.QtCore import QUrl
-                from PySide6.QtWebEngineCore import QWebEngineSettings  # type: ignore
-            except Exception:
-                return
-
-            # Make the HTML page same-origin with the WAV file directory so the <audio> element
-            # can read it reliably on Windows.
-            base_dir = path.parent.resolve()
-            base_url = QUrl.fromLocalFile(str(base_dir) + os.sep)
-            auto = " autoplay" if autoplay else ""
-            safe_path = str(path).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            safe_name = path.name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("'", "&#39;")
-            html = (
-                "<!doctype html><html><head><meta charset='utf-8'></head><body>"
-                "<div style='font-family:Segoe UI,Arial,sans-serif;font-size:12px;color:#444;'>"
-                f"试听文件：{safe_path}"
-                "</div>"
-                f"<audio controls{auto} style='width:100%; margin-top:6px;' src='{safe_name}'></audio>"
-                "</body></html>"
-            )
-
-            try:
-                settings = view.settings()
-                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessFileUrls, True)
-                settings.setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls, False)
-            except Exception:
-                pass
-
-            view.setHtml(html, base_url)
+        # Embedded QtWebEngine preview intentionally removed for stability.
 
         def _pick_pptx(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1726,243 +1516,6 @@ def _build_ui(QtWidgets, QtCore):
             if path:
                 self.out_edit.setText(path)
 
-        def _pick_publish_video(self) -> None:
-            QtWidgets = self._QtWidgets
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                "选择待发布视频",
-                self.publish_video_path_edit.text() or str(Path.cwd()),
-                "Video (*.mp4 *.mov *.mkv *.webm);;All files (*)",
-            )
-            if path:
-                self.publish_video_path_edit.setText(path)
-
-        def _pick_publish_cover(self) -> None:
-            QtWidgets = self._QtWidgets
-            path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                "选择封面图（可选）",
-                self.publish_cover_path_edit.text() or str(Path.cwd()),
-                "Image (*.png *.jpg *.jpeg *.webp);;All files (*)",
-            )
-            if path:
-                self.publish_cover_path_edit.setText(path)
-
-        def _toggle_publish_manual_video_enabled(self) -> None:
-            source = str(self.publish_video_source_combo.currentData() or "last_build")
-            manual = source == "manual"
-            self.publish_video_path_edit.setEnabled(manual)
-            self.publish_video_path_btn.setEnabled(manual)
-
-        def _publish_datetime_format(self) -> str:
-            return "yyyy-MM-dd HH:mm:ss"
-
-        def _append_publish_log(self, text: str) -> None:
-            self.publish_log.appendPlainText(text.rstrip("\n"))
-
-        def _set_publish_running(self, running: bool) -> None:
-            self.publish_start_btn.setEnabled((not running) and (not self._pipeline_busy))
-            self.publish_stop_btn.setEnabled(running)
-            self.publish_status_btn.setEnabled(not running)
-            self.publish_retry_btn.setEnabled(not running and self._publish_last_payload is not None)
-            self.publish_login_btn.setEnabled(not running)
-            self.publish_auth_status_btn.setEnabled(not running)
-            self.publish_platform_combo.setEnabled(not running)
-            self.publish_method_combo.setEnabled(not running)
-            self.publish_video_source_combo.setEnabled(not running)
-            self.publish_dry_run_chk.setEnabled(not running)
-            self.publish_auto_confirm_chk.setEnabled(not running)
-            self.publish_schedule_chk.setEnabled(not running)
-            self.publish_schedule_time.setEnabled((not running) and self.publish_schedule_chk.isChecked())
-            self.extract_btn.setEnabled((not running) and (not self._pipeline_busy))
-            self.build_btn.setEnabled((not running) and (not self._pipeline_busy))
-
-        def _build_publish_request(self) -> PublishRequest:
-            return PublishRequest(
-                platform=str(self.publish_platform_combo.currentData() or "douyin"),
-                method=str(self.publish_method_combo.currentData() or "web"),
-                video_source=str(self.publish_video_source_combo.currentData() or "last_build"),
-                out_dir=self.out_edit.text().strip(),
-                manual_video_path=self.publish_video_path_edit.text().strip(),
-                title=self.publish_title_edit.text().strip(),
-                topics=self.publish_topics_edit.text().strip(),
-                description=self.publish_description_edit.toPlainText().strip(),
-                cover_path=self.publish_cover_path_edit.text().strip(),
-                visibility=str(self.publish_visibility_combo.currentData() or "public"),
-                schedule_enabled=bool(self.publish_schedule_chk.isChecked()),
-                schedule_time=self.publish_schedule_time.dateTime().toString(self._publish_datetime_format()),
-                dry_run=bool(self.publish_dry_run_chk.isChecked()),
-                auto_confirm=bool(self.publish_auto_confirm_chk.isChecked()),
-            )
-
-        def _append_publish_result_row(
-            self,
-            *,
-            platform: str,
-            title: str,
-            status: str,
-            publish_id: str,
-            note: str,
-        ) -> None:
-            now_str = self._QtCore.QDateTime.currentDateTime().toString(self._publish_datetime_format())
-            row = self.publish_result_table.rowCount()
-            self.publish_result_table.insertRow(row)
-            values = [now_str, platform, title, status, publish_id, note]
-            for col, value in enumerate(values):
-                self.publish_result_table.setItem(row, col, self._QtWidgets.QTableWidgetItem(value))
-            self.publish_result_table.resizeColumnsToContents()
-
-        def _publish_login(self) -> None:
-            QtWidgets = self._QtWidgets
-            platform = str(self.publish_platform_combo.currentData() or "douyin")
-            method = str(self.publish_method_combo.currentData() or "web")
-            if method != "web":
-                QtWidgets.QMessageBox.information(self, "发布登录", "当前仅支持 web 方式登录。")
-                return
-            self._append_publish_log(f"[auth] 正在打开浏览器登录：平台={platform}, 方式={method}")
-            try:
-                result = perform_publish_login(
-                    platform=platform,
-                    method=method,
-                    wait_seconds=60,
-                )
-            except Exception as exc:
-                self.publish_auth_status_value.setText("登录失败")
-                self._append_publish_log(f"[auth] 登录失败：{exc}")
-                QtWidgets.QMessageBox.warning(self, "发布登录失败", str(exc))
-                return
-
-            logged_in = bool(result.get("logged_in"))
-            self.publish_auth_status_value.setText("已登录" if logged_in else "未登录")
-            self._append_publish_log(
-                f"[auth] 登录流程完成：logged_in={logged_in}, url={result.get('url')}"
-            )
-
-        def _publish_check_auth_status(self) -> None:
-            platform = str(self.publish_platform_combo.currentData() or "douyin")
-            method = str(self.publish_method_combo.currentData() or "web")
-            if method != "web":
-                self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 当前状态=未实现")
-                return
-            try:
-                result = check_publish_auth_status(
-                    platform=platform,
-                    method=method,
-                    headless=True,
-                )
-            except Exception as exc:
-                self.publish_auth_status_value.setText("检查失败")
-                self._append_publish_log(f"[auth-status] 平台={platform}, 方式={method}, 失败：{exc}")
-                return
-
-            logged_in = bool(result.get("logged_in"))
-            status = "已登录" if logged_in else "未登录"
-            self.publish_auth_status_value.setText(status)
-            self._append_publish_log(
-                f"[auth-status] 平台={platform}, 方式={method}, 当前状态={status}, url={result.get('url')}"
-            )
-
-        def _start_publish(self) -> None:
-            QtWidgets = self._QtWidgets
-            if self._pipeline_busy:
-                QtWidgets.QMessageBox.information(self, "发布", "正在执行 Extract/Build，请稍后再发布。")
-                return
-            if self._publish_busy:
-                return
-            request = self._build_publish_request()
-            try:
-                execution = build_publish_request(request)
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(self, "发布参数错误", str(exc))
-                return
-
-            payload = execution.ui_payload
-            self._publish_last_payload = payload
-            self.publish_log.clear()
-            self._append_publish_log("开始发布任务（web 自动化）…")
-            self._append_publish_log(
-                f"platform={payload['platform']}, method={payload['method']}, video={payload['video_path']}"
-            )
-            self._publish_busy = True
-            self._set_publish_running(True)
-            self.publish_progress.setValue(0)
-            self.publish_progress.setFormat("进度：准备中 (0/5)")
-            stage_map = {
-                "open_page": ("打开发布页面", 1),
-                "check_auth": ("检查登录状态", 1),
-                "upload_video": ("上传视频文件", 2),
-                "fill_form": ("填写发布信息", 3),
-                "confirm_publish": ("等待发布确认", 4),
-                "done": ("完成", 5),
-            }
-
-            def _stage_callback(name: str) -> None:
-                label, value = stage_map.get(name, (name, self.publish_progress.value()))
-                self._append_publish_log(f"阶段：{label}")
-                self.publish_progress.setValue(value)
-                self.publish_progress.setFormat(f"进度：{label} ({value}/5)")
-
-            try:
-                result = perform_publish_execution(
-                    execution,
-                    headless=False,
-                    stage_callback=_stage_callback,
-                )
-                status = str(result.get("status") or "ok")
-                note = str(result.get("note") or "")
-                publish_id = str(result.get("publish_id") or "")
-                self._append_publish_result_row(
-                    platform=str(payload["platform"]),
-                    title=str(payload["title"]),
-                    status=status,
-                    publish_id=publish_id,
-                    note=note,
-                )
-                self._append_publish_log(f"发布流程结束：{status}，{note}")
-                self.publish_progress.setValue(5)
-                self.publish_progress.setFormat(f"进度：{note or '完成'}")
-                write_publish_record(log_path=execution.log_path, payload=payload, result=result)
-            except Exception as exc:
-                err = str(exc)
-                self._append_publish_result_row(
-                    platform=str(payload["platform"]),
-                    title=str(payload["title"]),
-                    status="error",
-                    publish_id="",
-                    note=err,
-                )
-                self._append_publish_log(f"发布流程失败：{err}")
-                self.publish_progress.setFormat("进度：失败")
-                write_publish_record(log_path=execution.log_path, payload=payload, error=err)
-                QtWidgets.QMessageBox.warning(self, "发布失败", err)
-            finally:
-                self._publish_busy = False
-                self._set_publish_running(False)
-                self._publish_timer = None
-
-        def _stop_publish(self) -> None:
-            # Browser-based publish currently runs synchronously; we only update UI hint here.
-            if self._publish_busy:
-                self._append_publish_log("停止请求已记录：请关闭浏览器页面以终止当前步骤。")
-                self.publish_progress.setFormat("停止请求已记录")
-            else:
-                self._append_publish_log("当前没有进行中的发布任务。")
-
-        def _publish_check_last_status(self) -> None:
-            if self._publish_last_payload is None:
-                self._append_publish_log("暂无发布任务记录。")
-                return
-            line1, line2 = last_publish_status_lines(self._publish_last_payload)
-            self._append_publish_log(line1)
-            self._append_publish_log(line2)
-
-        def _publish_retry_last(self) -> None:
-            if self._publish_last_payload is None:
-                self._append_publish_log("没有可重试的发布任务。")
-                return
-            self._append_publish_log("重试最近一次发布任务…")
-            self._start_publish()
-
         def _validate(self) -> JobConfig:
             pptx = Path(self.pptx_edit.text().strip().strip('"'))
             out_dir = Path(self.out_edit.text().strip().strip('"'))
@@ -1971,8 +1524,6 @@ def _build_ui(QtWidgets, QtCore):
             voice_id = self._current_voice_id()
             tts_rate = float(self.tts_rate_spin.value())
             subtitle_color = self.subtitle_color_value.text().strip() or None
-            subtitle_highlight_mode = str(self.subtitle_highlight_mode_combo.currentData() or "none").strip() or "none"
-            subtitle_highlight_color = self.subtitle_highlight_color_value.text().strip() or None
             subtitle_fade_in_ms = int(self.subtitle_fade_in_spin.value())
             subtitle_fade_out_ms = int(self.subtitle_fade_out_spin.value())
             subtitle_scale_from = int(self.subtitle_scale_from_spin.value())
@@ -2002,8 +1553,6 @@ def _build_ui(QtWidgets, QtCore):
                 tts_rate=tts_rate,
                 minimax_base_url=None,
                 subtitle_color=subtitle_color,
-                subtitle_highlight_mode=subtitle_highlight_mode,
-                subtitle_highlight_color=subtitle_highlight_color,
                 subtitle_fade_in_ms=subtitle_fade_in_ms,
                 subtitle_fade_out_ms=subtitle_fade_out_ms,
                 subtitle_scale_from=subtitle_scale_from,
@@ -2030,12 +1579,6 @@ def _build_ui(QtWidgets, QtCore):
             self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
             self.progress.setEnabled(True)
-            if hasattr(self, "publish_start_btn"):
-                self.publish_start_btn.setEnabled((not running) and (not self._publish_busy))
-                self.publish_status_btn.setEnabled((not running) and (not self._publish_busy))
-                self.publish_retry_btn.setEnabled((not running) and (not self._publish_busy))
-                self.publish_login_btn.setEnabled((not running) and (not self._publish_busy))
-                self.publish_auth_status_btn.setEnabled((not running) and (not self._publish_busy))
             if not running:
                 # Keep the last progress visible; mark idle explicitly.
                 if self.progress.value() >= 4:
@@ -2080,11 +1623,7 @@ def _build_ui(QtWidgets, QtCore):
                 self._append_log("试听进行中，请等待试听完成后再执行任务。")
                 return
 
-            if self._publish_busy:
-                self._append_log("发布任务进行中，请等待发布流程结束后再执行制作任务。")
-                return
-
-            if self._thread is not None or self._pipeline_busy:
+            if self._pipeline_busy:
                 return
 
             try:
@@ -2099,8 +1638,6 @@ def _build_ui(QtWidgets, QtCore):
                     tts_rate=config.tts_rate,
                     minimax_base_url=config.minimax_base_url,
                     subtitle_color=config.subtitle_color,
-                    subtitle_highlight_mode=config.subtitle_highlight_mode,
-                    subtitle_highlight_color=config.subtitle_highlight_color,
                     subtitle_fade_in_ms=config.subtitle_fade_in_ms,
                     subtitle_fade_out_ms=config.subtitle_fade_out_ms,
                     subtitle_scale_from=config.subtitle_scale_from,
@@ -2126,29 +1663,38 @@ def _build_ui(QtWidgets, QtCore):
             self.progress.setValue(0)
             self.progress.setFormat("进度：准备中 (0/4)")
 
-            # Run pipeline in a background thread so the GUI stays responsive.
-            thread = QtCore.QThread()
-            worker = _build_worker(QtCore, config)
-            self._thread = thread
-            self._worker = worker
-            worker.moveToThread(thread)
-            worker.log.connect(self._handle_pipeline_log)
+            # Run pipeline via QProcess (no Python threads) for stability on Windows.
+            proc = QtCore.QProcess(self)
+            proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
+            argv = _build_cli_argv_for_config(config)
+            program = argv[0]
+            args = argv[1:]
+            self._append_log("开始运行（QProcess）…")
+            self._append_log("command: " + " ".join(argv))
+            self._pipeline_proc = proc
 
-            thread.started.connect(worker.run)
+            def _on_ready() -> None:
+                try:
+                    data = proc.readAllStandardOutput().data()
+                    if not data:
+                        return
+                    text = bytes(data).decode("utf-8", errors="replace")
+                    for line in text.splitlines():
+                        self._handle_pipeline_log(line)
+                except Exception:
+                    self._append_log(traceback.format_exc())
 
-            def _done(exit_code: int) -> None:
-                self._append_log(f"退出码：{exit_code}")
+            def _on_finished(exit_code: int, _status) -> None:
+                self._append_log(f"退出码：{int(exit_code)}")
                 self._pipeline_busy = False
                 self._set_running(False)
-                thread.quit()
-                thread.wait(3000)
-                self._thread = None
-                self._worker = None
-                if exit_code != 0:
+                self._pipeline_proc = None
+                if int(exit_code) != 0:
                     QtWidgets.QMessageBox.warning(self, "运行失败", "任务未成功完成，请查看下方日志。")
 
-            worker.done.connect(_done)
-            thread.start()
+            proc.readyReadStandardOutput.connect(_on_ready)
+            proc.finished.connect(_on_finished)
+            proc.start(program, args)
 
         def _finish_pipeline_main_thread(self, config: JobConfig) -> None:
             QtWidgets = self._QtWidgets
@@ -2160,11 +1706,14 @@ def _build_ui(QtWidgets, QtCore):
                 QtWidgets.QMessageBox.warning(self, "运行失败", "任务未成功完成，请查看下方日志。")
 
         def _stop(self) -> None:
-            # Best-effort: we can stop the thread, but subprocesses / COM calls may not be interruptible.
-            if self._thread is None:
+            proc = getattr(self, "_pipeline_proc", None)
+            if proc is None:
                 return
             self._append_log("请求停止（best-effort）…")
-            self._thread.requestInterruption()
+            try:
+                proc.terminate()
+            except Exception:
+                pass
 
         def _open_tts_settings(self) -> None:
             _run_tts_settings_dialog(self, QtWidgets=self._QtWidgets, append_log=self._append_log)

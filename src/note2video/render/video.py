@@ -24,8 +24,6 @@ def render_video(
     bgm_fade_in_s: float = 0.0,
     bgm_fade_out_s: float = 0.0,
     subtitle_color: str | None = None,
-    subtitle_highlight_color: str | None = None,
-    subtitle_highlight_mode: str | None = None,  # none|line|word
     subtitle_fade_in_ms: int | None = None,
     subtitle_fade_out_ms: int | None = None,
     subtitle_scale_from: int | None = None,
@@ -61,11 +59,9 @@ def render_video(
     temp_video = video_dir / "video_only.mp4"
     subtitle_path = root / manifest.get("outputs", {}).get("subtitle", "subtitles/subtitles.srt")
     subtitle_json_path = root / manifest.get("outputs", {}).get("subtitle_json", "subtitles/subtitles.json")
-    word_timings_path = root / manifest.get("outputs", {}).get("word_timings", "audio/word_timings.json")
 
     # If advanced subtitle effects are requested, generate an ASS and burn that in.
-    hm = (subtitle_highlight_mode or "").strip().lower()
-    use_ass_effects = hm in {"line", "word"} or bool(subtitle_highlight_color)
+    use_ass_effects = False
     if any(
         v is not None
         for v in (
@@ -80,18 +76,12 @@ def render_video(
         use_ass_effects = True
 
     if use_ass_effects and subtitle_json_path.exists():
-        segments = _load_subtitle_segments_for_ass(
-            subtitle_json_path=subtitle_json_path,
-            word_timings_path=word_timings_path if word_timings_path.exists() else None,
-            highlight_mode=hm,
-        )
+        segments = _load_subtitle_segments_for_ass(subtitle_json_path=subtitle_json_path)
         ass_out = root / "subtitles" / "subtitles.effects.ass"
         ass_out.parent.mkdir(parents=True, exist_ok=True)
         ass_text = build_ass(
             segments=segments,
-            highlight_mode=hm or "none",
             base_color=subtitle_color or "#FFFFFF",
-            highlight_color=subtitle_highlight_color or "#FFD400",
             fade_in_ms=subtitle_fade_in_ms if subtitle_fade_in_ms is not None else 80,
             fade_out_ms=subtitle_fade_out_ms if subtitle_fade_out_ms is not None else 120,
             scale_from=subtitle_scale_from if subtitle_scale_from is not None else 100,
@@ -172,6 +162,11 @@ def render_video(
             "-i",
             str(concat_file),
             "-vf",
+            # Standardize output to 1080p for predictable subtitle sizing.
+            # Keep aspect ratio and pad to avoid stretching.
+            "scale=1920:1080:force_original_aspect_ratio=decrease,"
+            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            "setsar=1,"
             "fps=30,format=yuv420p",
             "-r",
             "30",
@@ -361,31 +356,12 @@ def _build_subtitle_filter(
 def _load_subtitle_segments_for_ass(
     *,
     subtitle_json_path: Path,
-    word_timings_path: Path | None,
-    highlight_mode: str,
 ) -> list[dict[str, Any]]:
     payload = json.loads(subtitle_json_path.read_text(encoding="utf-8"))
     base_segments = payload.get("segments") or []
     if not isinstance(base_segments, list):
         return []
-
-    hm = (highlight_mode or "").strip().lower()
-    if hm != "word" or word_timings_path is None or not word_timings_path.exists():
-        return [seg for seg in base_segments if isinstance(seg, dict)]
-
-    w_payload = json.loads(word_timings_path.read_text(encoding="utf-8"))
-    w_segments = w_payload.get("segments") or []
-    if not isinstance(w_segments, list):
-        return [seg for seg in base_segments if isinstance(seg, dict)]
-
-    merged: list[dict[str, Any]] = []
-    for seg in w_segments:
-        if not isinstance(seg, dict):
-            continue
-        if "words" not in seg:
-            continue
-        merged.append(seg)
-    return merged or [seg for seg in base_segments if isinstance(seg, dict)]
+    return [seg for seg in base_segments if isinstance(seg, dict)]
 
 
 def _cleanup_render_intermediates(*, temp_video: Path, concat_file: Path) -> None:

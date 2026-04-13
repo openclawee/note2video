@@ -90,8 +90,6 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
         tts_provider="edge",
         voice_id="zh-CN-XiaoxiaoNeural",
         tts_rate=1.25,
-        subtitle_highlight_mode="word",
-        subtitle_highlight_color="&H00FFFF&",
         subtitle_fade_in_ms=90,
         subtitle_fade_out_ms=130,
         subtitle_scale_from=98,
@@ -116,7 +114,6 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
     assert req.tts_provider == "edge"
     assert req.voice_id == "zh-CN-XiaoxiaoNeural"
     assert req.tts_rate == 1.25
-    assert req.subtitle_highlight_mode == "word"
     assert req.subtitle_fade_in_ms == 90
     assert req.subtitle_fade_out_ms == 130
     assert req.subtitle_scale_from == 98

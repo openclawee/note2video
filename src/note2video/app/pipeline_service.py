@@ -24,8 +24,6 @@ class BuildRequest:
     bgm_fade_out_s: float = 0.0
     narration_volume: float = 1.0
     subtitle_color: str | None = None
-    subtitle_highlight_mode: str | None = None
-    subtitle_highlight_color: str | None = None
     subtitle_fade_in_ms: int = 80
     subtitle_fade_out_ms: int = 120
     subtitle_scale_from: int = 100
@@ -74,8 +72,6 @@ class RenderRequest:
     bgm_fade_out_s: float = 0.0
     narration_volume: float = 1.0
     subtitle_color: str | None = None
-    subtitle_highlight_mode: str | None = None
-    subtitle_highlight_color: str | None = None
     subtitle_fade_in_ms: int = 80
     subtitle_fade_out_ms: int = 120
     subtitle_scale_from: int = 100
@@ -127,8 +123,6 @@ class PipelineService:
             bgm_fade_out_s=float(request.bgm_fade_out_s),
             narration_volume=float(request.narration_volume),
             subtitle_color=request.subtitle_color,
-            subtitle_highlight_mode=request.subtitle_highlight_mode,
-            subtitle_highlight_color=request.subtitle_highlight_color,
             subtitle_fade_in_ms=int(request.subtitle_fade_in_ms),
             subtitle_fade_out_ms=int(request.subtitle_fade_out_ms),
             subtitle_scale_from=int(request.subtitle_scale_from),
@@ -160,7 +154,15 @@ def run_build_pipeline(
         tts_rate=request.tts_rate,
         minimax_base_url=None,
     )
-    subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
+    try:
+        subtitle_result = generate_subtitles_fn(
+            str(script_path),
+            str(out_dir),
+            subtitle_size=request.subtitle_size,
+        )
+    except TypeError:
+        # Backward-compatibility for tests/mocks that still use the older subtitle signature.
+        subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
     render_kwargs = {
         "bgm_path": request.bgm_path,
         "bgm_volume": float(request.bgm_volume),
@@ -170,8 +172,6 @@ def run_build_pipeline(
         "subtitle_color": request.subtitle_color,
     }
     advanced_kwargs = {
-        "subtitle_highlight_mode": request.subtitle_highlight_mode,
-        "subtitle_highlight_color": request.subtitle_highlight_color,
         "subtitle_fade_in_ms": int(request.subtitle_fade_in_ms),
         "subtitle_fade_out_ms": int(request.subtitle_fade_out_ms),
         "subtitle_scale_from": int(request.subtitle_scale_from),
@@ -297,8 +297,6 @@ def run_render_pipeline(
         bgm_fade_out_s=float(request.bgm_fade_out_s),
         narration_volume=float(request.narration_volume),
         subtitle_color=request.subtitle_color,
-        subtitle_highlight_mode=request.subtitle_highlight_mode,
-        subtitle_highlight_color=request.subtitle_highlight_color,
         subtitle_fade_in_ms=int(request.subtitle_fade_in_ms),
         subtitle_fade_out_ms=int(request.subtitle_fade_out_ms),
         subtitle_scale_from=int(request.subtitle_scale_from),

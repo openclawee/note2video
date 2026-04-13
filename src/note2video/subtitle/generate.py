@@ -22,7 +22,13 @@ class SubtitleSegment:
     text: str
 
 
-def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
+def generate_subtitles(
+    input_json: str,
+    output_dir: str,
+    *,
+    subtitle_size: int | None = None,
+    max_lines: int = 2,
+) -> dict[str, Any]:
     input_path = Path(input_json)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -37,13 +43,13 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
 
     scripts = _load_scripts(input_path)
     manifest = _load_manifest(manifest_path)
+    wrap = _SubtitleWrapConfig.from_subtitle_size(subtitle_size, max_lines=max_lines)
     timing_segments = _load_timing_segments(project_dir, manifest)
-    word_timings = _load_word_timing_segments(project_dir, manifest)
     if timing_segments is not None:
-        segments = _build_segments_from_timings(timing_segments, word_timings=word_timings)
+        segments = _build_segments_from_timings(timing_segments, wrap=wrap)
     else:
         durations = _load_slide_durations(manifest)
-        segments = _build_segments(scripts=scripts, durations=durations)
+        segments = _build_segments(scripts=scripts, durations=durations, wrap=wrap)
     srt_path = subtitles_dir / "subtitles.srt"
     ass_path = subtitles_dir / "subtitles.ass"
     json_path = subtitles_dir / "subtitles.json"
@@ -123,37 +129,11 @@ def _load_timing_segments(project_dir: Path, manifest: dict[str, Any]) -> list[d
     return segments
 
 
-def _load_word_timing_segments(project_dir: Path, manifest: dict[str, Any]) -> dict[tuple[int, int], list[dict[str, Any]]]:
-    """
-    Load word-level timing from word_timings.json if available.
-
-    Returns a dict keyed by (page, sentence_index) → list of word dicts
-    with {text, offset_ms, duration_ms}.
-    """
-    word_timings_rel = manifest.get("outputs", {}).get("word_timings")
-    if not word_timings_rel:
-        return {}
-    word_timings_path = project_dir / word_timings_rel
-    if not word_timings_path.exists():
-        return {}
-    payload = json.loads(word_timings_path.read_text(encoding="utf-8"))
-    segments = payload.get("segments")
-    if not isinstance(segments, list):
-        return {}
-    # Index by (page, sentence_index) for O(1) lookup when building ASS lines.
-    result: dict[tuple[int, int], list[dict[str, Any]]] = {}
-    for seg in segments:
-        words = seg.get("words") or []
-        if isinstance(words, list) and words:
-            key = (int(seg["page"]), int(seg["sentence_index"]))
-            result[key] = words
-    return result
-
-
 def _build_segments(
     *,
     scripts: list[dict[str, Any]],
     durations: dict[int, int],
+    wrap: "_SubtitleWrapConfig",
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     cursor_ms = 0
@@ -186,6 +166,7 @@ def _build_segments(
         sentence_start = cursor_ms
         for sentence, duration in zip(sentences, segment_durations):
             sentence_end = sentence_start + duration
+            sentence = _wrap_subtitle_text(sentence, wrap=wrap)
             segments.append(
                 SubtitleSegment(
                     index=index,
@@ -206,25 +187,21 @@ def _build_segments(
 def _build_segments_from_timings(
     timing_segments: list[dict[str, Any]],
     *,
-    word_timings: dict[tuple[int, int], list[dict[str, Any]]],
+    wrap: "_SubtitleWrapConfig",
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     for item in timing_segments:
         page = int(item["page"])
-        sentence_index = int(item.get("sentence_index", 0) or 0)
-        words = word_timings.get((page, sentence_index), []) or []
+        text = _wrap_subtitle_text(str(item.get("text", "")), wrap=wrap)
         segments.append(
             SubtitleSegment(
                 index=int(item["index"]),
                 page=page,
                 start_ms=int(item["start_ms"]),
                 end_ms=int(item["end_ms"]),
-                text=str(item.get("text", "")),
+                text=text,
             )
         )
-        if words:
-            # Attach words to the last segment's __dict__ so build_ass can read it.
-            segments[-1].__dict__["words"] = words
     return segments
 
 
@@ -236,6 +213,95 @@ def _split_sentences(text: str) -> list[str]:
     raw_parts = re.split(r"(?<=[。！？!?；;])|\n+", normalized)
     parts = [part.strip() for part in raw_parts if part and part.strip()]
     return parts
+
+
+class _SubtitleWrapConfig:
+    def __init__(self, *, max_chars_per_line: int, max_lines: int) -> None:
+        self.max_chars_per_line = int(max_chars_per_line)
+        self.max_lines = int(max_lines)
+
+    @staticmethod
+    def from_subtitle_size(subtitle_size: int | None, *, max_lines: int) -> "_SubtitleWrapConfig":
+        """
+        Heuristic mapping from font size (1080p) to max characters per line.
+
+        Baseline: 48px font ≈ 18 chars/line (tuned for 1920x1080 with typical margins).
+        """
+        try:
+            size = int(subtitle_size) if subtitle_size is not None else 0
+        except Exception:
+            size = 0
+
+        if size <= 0:
+            return _SubtitleWrapConfig(max_chars_per_line=18, max_lines=max_lines)
+
+        # Inverse scale around the baseline: bigger font → fewer chars per line.
+        est = int(round(18 * 48 / max(size, 8)))
+        est = max(10, min(30, est))
+        return _SubtitleWrapConfig(max_chars_per_line=est, max_lines=max_lines)
+
+
+def _wrap_subtitle_text(text: str, *, wrap: _SubtitleWrapConfig) -> str:
+    """
+    Wrap a subtitle sentence into at most `max_lines` lines.
+
+    We use a simple character-count heuristic so it works for both CJK and English
+    without relying on font metrics. This is tuned for 1080p output.
+    """
+    t = (text or "").replace("\r", "\n").strip()
+    if not t:
+        return ""
+    # Preserve explicit newlines from upstream.
+    if "\n" in t:
+        return "\n".join(line.strip() for line in t.splitlines() if line.strip())
+    max_chars_per_line = int(wrap.max_chars_per_line)
+    max_lines = int(wrap.max_lines)
+    if max_chars_per_line <= 0 or max_lines <= 1:
+        return t
+    if len(t) <= max_chars_per_line:
+        return t
+
+    # Prefer splitting near the middle using punctuation / spaces.
+    preferred_breaks = "，,、：:；;。！？!?"
+    target = min(len(t) - 1, max_chars_per_line)
+    best = -1
+    best_score = 10**9
+    for i, ch in enumerate(t[:-1], start=1):
+        if ch not in preferred_breaks and ch != " ":
+            continue
+        # Lower score is better: close to target and not too early.
+        score = abs(i - target)
+        if score < best_score:
+            best = i
+            best_score = score
+
+    if best <= 0:
+        best = max_chars_per_line
+
+    first = t[:best].rstrip()
+    second = t[best:].lstrip()
+    if not second:
+        return first
+
+    if max_lines == 2:
+        # If still too long, hard-wrap the second line once.
+        if len(second) > max_chars_per_line:
+            second = second[:max_chars_per_line].rstrip() + "…"
+        return first + "\n" + second
+
+    # Generic multi-line wrapping fallback.
+    lines: list[str] = [first]
+    rest = second
+    while rest and len(lines) < max_lines:
+        if len(rest) <= max_chars_per_line:
+            lines.append(rest)
+            rest = ""
+            break
+        lines.append(rest[:max_chars_per_line].rstrip())
+        rest = rest[max_chars_per_line:].lstrip()
+    if rest:
+        lines[-1] = (lines[-1].rstrip() + "…").rstrip()
+    return "\n".join(lines)
 
 
 def _allocate_durations(*, total: int, weights: list[int]) -> list[int]:

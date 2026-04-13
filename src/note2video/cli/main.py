@@ -78,17 +78,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Subtitle font size in pixels when burning into video (0 = default).",
     )
     build_cmd.add_argument(
-        "--subtitle-highlight-mode",
-        default="none",
-        choices=["none", "line", "word"],
-        help="Subtitle highlight mode: none|line|word (word requires edge-tts word timings).",
-    )
-    build_cmd.add_argument(
-        "--subtitle-highlight-color",
-        default="",
-        help="Highlight color used by highlight mode (hex #RRGGBB). Example: #FFD400",
-    )
-    build_cmd.add_argument(
         "--subtitle-fade-in-ms",
         type=int,
         default=80,
@@ -193,17 +182,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Subtitle font size in pixels when burning into video (0 = default).",
     )
     render_cmd.add_argument(
-        "--subtitle-highlight-mode",
-        default="none",
-        choices=["none", "line", "word"],
-        help="Subtitle highlight mode: none|line|word (word requires edge-tts word timings).",
-    )
-    render_cmd.add_argument(
-        "--subtitle-highlight-color",
-        default="",
-        help="Highlight color used by highlight mode (hex #RRGGBB). Example: #FFD400",
-    )
-    render_cmd.add_argument(
         "--subtitle-fade-in-ms",
         type=int,
         default=80,
@@ -269,8 +247,6 @@ def handle_build(args: argparse.Namespace) -> int:
             bgm_fade_out_s=float(args.bgm_fade_out),
             narration_volume=float(args.narration_volume),
             subtitle_color=(args.subtitle_color.strip() or None),
-            subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
-            subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
             subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
             subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
             subtitle_scale_from=int(args.subtitle_scale_from),
@@ -398,8 +374,6 @@ def handle_render(args: argparse.Namespace) -> int:
             bgm_fade_out_s=float(args.bgm_fade_out),
             narration_volume=float(args.narration_volume),
             subtitle_color=(args.subtitle_color.strip() or None),
-            subtitle_highlight_mode=(args.subtitle_highlight_mode.strip() or None),
-            subtitle_highlight_color=(args.subtitle_highlight_color.strip() or None),
             subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
             subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
             subtitle_scale_from=int(args.subtitle_scale_from),
