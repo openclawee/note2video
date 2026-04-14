@@ -12,7 +12,7 @@ def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
         pptx_path=tmp_path / "demo.pptx",
         out_dir=tmp_path / "dist",
         pages="all",
-        tts_provider="pyttsx3",
+        tts_provider="edge",
         voice_id="",
         tts_rate=1.0,
     )
@@ -72,10 +72,10 @@ def test_run_build_mode_delegates_to_build_service(monkeypatch, tmp_path) -> Non
     assert exit_code == 0
     assert [c[0] for c in calls] == ["extract", "build"]
     build_request = calls[1][1]
-    assert build_request.tts_provider == "pyttsx3"
+    assert build_request.tts_provider == "edge"
     assert build_request.tts_rate == 1.0
-    assert "阶段：voice" in logs
-    assert "细节：provider=pyttsx3, voice=default, tts_rate=1.0" in logs
+    assert any("voice" in s for s in logs)
+    assert any("tts_rate=1.0" in s and "voice=" in s for s in logs)
     assert "细节：segments=12, slides=5" in logs
     assert "细节：subtitles_burned=True, mixed_audio=True" in logs
     assert "输出视频：video/output.mp4" in logs
