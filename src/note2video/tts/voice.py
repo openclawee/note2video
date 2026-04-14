@@ -6,6 +6,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 import wave
@@ -140,13 +141,27 @@ def generate_voice_assets(
 
         if text.strip():
             sentence_cursor_ms = global_cursor_ms
-            parts = _split_sentences_with_pauses(text)
+            parts = _split_tts_chunks_with_pauses(text)
             if not parts:
                 parts = [(text.strip(), 0)]
 
             for idx, (sentence, pause_ms) in enumerate(parts, start=1):
                 sentence_file = audio_dir / f"{page:03d}.{idx:02d}.wav"
-                provider.synthesize_to_file(text=sentence, output_file=sentence_file)
+                try:
+                    provider.synthesize_to_file(text=sentence, output_file=sentence_file)
+                except Exception as exc:
+                    snippet = _safe_snippet(sentence, limit=120)
+                    raise VoiceGenerationError(
+                        "TTS synthesis failed.\n"
+                        f"- page: {page}\n"
+                        f"- sentence_index: {idx}\n"
+                        f"- chars: {len(sentence)}\n"
+                        f"- text: {snippet}\n"
+                        f"- provider: {provider_name}\n"
+                        f"- voice: {voice_id or 'default'}\n"
+                        f"- tts_rate: {rate_mult}\n"
+                        f"- cause: {type(exc).__name__}: {exc}"
+                    ) from exc
                 sentence_duration_ms = _read_wav_duration_ms(sentence_file)
                 sentence_files.append(sentence_file)
                 pause_ms = int(pause_ms or 0)
@@ -334,6 +349,7 @@ class EdgeTTSProvider:
         except ImportError as exc:  # pragma: no cover
             raise VoiceGenerationError("edge-tts is required for Edge voice generation.") from exc
 
+        text = _sanitize_tts_text(text)
         temp_audio = output_file.with_suffix(".edge.mp3")
         pct = int(round((self.tts_rate - 1.0) * 100))
         pct = max(-50, min(100, pct))
@@ -344,33 +360,133 @@ class EdgeTTSProvider:
             await communicate.save(str(temp_audio))
 
         last_exc: Exception | None = None
-        for attempt, rate in enumerate([rate_str, "+0%"], start=1):
+        # Edge TTS can intermittently return empty audio on some networks. We retry a few times with
+        # exponential backoff, and also fall back to a neutral rate to reduce parameter sensitivity.
+        rate_candidates = [rate_str, "+0%"] if rate_str != "+0%" else ["+0%"]
+        max_attempts = int(os.getenv("NOTE2VIDEO_EDGE_TTS_RETRIES", "4") or "4")
+        max_attempts = max(1, min(max_attempts, 8))
+        attempt = 0
+        for rate in rate_candidates:
+            for _ in range(max_attempts):
+                attempt += 1
+                sleep_s = min(3.0, 0.35 * (2 ** max(0, attempt - 1)))
             try:
-                asyncio.run(_run(rate))
-                _convert_audio_to_wav(temp_audio=temp_audio, output_file=output_file)
-                return
+                    asyncio.run(_run(rate))
+                    _convert_audio_to_wav(temp_audio=temp_audio, output_file=output_file)
+                    return
             except Exception as exc:  # pragma: no cover - runtime/network specific
                 last_exc = exc
-                # Some networks intermittently fail to return audio; retry once with a neutral rate.
+                # Some networks intermittently fail to return audio; best-effort cleanup then retry.
                 try:
                     if temp_audio.exists():
                         temp_audio.unlink()
                 except OSError:
                     pass
-                if attempt >= 2:
-                    msg = (
-                        f"edge-tts synthesis failed: {exc}\n"
-                        f"- voice: {self.voice_id}\n"
-                        f"- rate: {rate_str}\n"
-                        "Hints:\n"
-                        "- Check network connectivity (edge-tts requires outbound access).\n"
-                        "- If you're behind a proxy/VPN/firewall, try from a different network.\n"
-                        "- Try a different voice ID (run: note2video voices --tts-provider edge).\n"
-                    )
-                    raise VoiceGenerationError(msg) from exc
+                # Backoff before retrying. Keep it short so build doesn't feel "hung".
+                time.sleep(sleep_s)
+                continue
+        msg = (
+            f"edge-tts synthesis failed: {last_exc}\n"
+            f"- voice: {self.voice_id}\n"
+            f"- rate: {rate_str}\n"
+            f"- chars: {len(text)}\n"
+            "Hints:\n"
+            "- If preview works but build fails, it may be intermittent network/proxy stability or long text.\n"
+            "- Try reducing tts_rate to 1.0, or try a different voice ID.\n"
+            "- If you're behind a proxy/VPN/firewall, ensure the Python subprocess inherits proxy env vars.\n"
+        )
+        raise VoiceGenerationError(msg) from last_exc
         # Should never reach here.
         if last_exc is not None:
             raise VoiceGenerationError(f"edge-tts synthesis failed: {last_exc}") from last_exc
+
+
+def _sanitize_tts_text(text: str) -> str:
+    """
+    Best-effort sanitization for cloud TTS engines.
+
+    - Remove NUL/control characters that can break WS payloads.
+    - Normalize CRLF to LF.
+    - Collapse excessive whitespace.
+    """
+    s = str(text or "")
+    s = s.replace("\r", "\n")
+    # Drop ASCII control chars except \n and \t.
+    s = re.sub(r"[\x00-\x08\x0B\x0C\x0E-\x1F]", "", s)
+    # Avoid pathological whitespace; keep newlines as they may indicate pauses.
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def _safe_snippet(text: str, *, limit: int = 120) -> str:
+    s = (text or "").replace("\r", " ").replace("\n", " ").strip()
+    if len(s) <= limit:
+        return s
+    return s[: max(0, limit - 1)] + "…"
+
+
+def _split_tts_chunks_with_pauses(text: str) -> list[tuple[str, int]]:
+    """
+    Split into reasonably sized chunks for TTS stability.
+
+    Some providers (notably edge-tts on certain networks) are more likely to fail on long sentences.
+    We first split by punctuation/newlines, then further split overlong chunks by commas/whitespace.
+    """
+    normalized = _sanitize_tts_text(text)
+    parts = _split_sentences_with_pauses(normalized)
+    if not parts:
+        return []
+
+    # Conservative default; can be overridden for power users.
+    try:
+        max_chars = int(os.getenv("NOTE2VIDEO_TTS_MAX_CHARS", "240") or "240")
+    except ValueError:
+        max_chars = 240
+    max_chars = max(80, min(max_chars, 800))
+
+    out: list[tuple[str, int]] = []
+    for chunk, pause_ms in parts:
+        c = chunk.strip()
+        if not c:
+            continue
+        if len(c) <= max_chars:
+            out.append((c, pause_ms))
+            continue
+
+        # First try to split by commas/顿号; keep punctuation.
+        subparts = re.split(r"(?<=[，,、])\s*", c)
+        buf = ""
+        for sp in subparts:
+            sp = sp.strip()
+            if not sp:
+                continue
+            candidate = (buf + (" " if buf and not buf.endswith(("\n", " ")) else "") + sp).strip()
+            if not buf:
+                buf = sp
+                continue
+            if len(candidate) <= max_chars:
+                buf = candidate
+                continue
+            out.append((buf.strip(), 80))
+            buf = sp
+        if buf.strip():
+            # Keep the original pause on the last piece.
+            out.append((buf.strip(), pause_ms))
+
+    # Final pass: hard split any remaining very long chunks (no punctuation/commas).
+    final: list[tuple[str, int]] = []
+    for chunk, pause_ms in out:
+        if len(chunk) <= max_chars:
+            final.append((chunk, pause_ms))
+            continue
+        start = 0
+        while start < len(chunk):
+            piece = chunk[start : start + max_chars].strip()
+            start += max_chars
+            if not piece:
+                continue
+            final.append((piece, pause_ms if start >= len(chunk) else 60))
+    return final
 
 
 class MiniMaxTTSProvider:
