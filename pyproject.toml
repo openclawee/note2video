@@ -15,8 +15,10 @@ license = { text = "MIT" }
 dependencies = [
   "edge-tts",
   "imageio-ffmpeg",
+  "pymupdf",
   "pillow",
   "playwright",
+  "pypdf",
   "pywin32; platform_system == 'Windows'",
   "pyttsx3",
 ]

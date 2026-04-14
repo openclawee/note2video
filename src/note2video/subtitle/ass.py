@@ -56,6 +56,12 @@ def build_ass(
     shadow: int = 0,
     font: str = "",
     font_size: int = 48,
+    play_res_x: int = 1920,
+    play_res_y: int = 1080,
+    margin_l: int = 80,
+    margin_r: int = 80,
+    margin_v: int = 60,
+    subtitle_y_ratio: float | None = None,
 ) -> str:
     """
     Build an ASS subtitle document.
@@ -69,14 +75,27 @@ def build_ass(
     outline = max(0, int(outline))
     shadow = max(0, int(shadow))
     font_size = max(8, int(font_size))
+    play_res_x = max(64, int(play_res_x))
+    play_res_y = max(64, int(play_res_y))
+    margin_l = max(0, int(margin_l))
+    margin_r = max(0, int(margin_r))
+    margin_v = max(0, int(margin_v))
+    if subtitle_y_ratio is not None:
+        try:
+            subtitle_y_ratio = float(subtitle_y_ratio)
+        except Exception:
+            subtitle_y_ratio = None
+    if subtitle_y_ratio is not None:
+        # Clamp to [0, 1] to avoid out-of-frame coordinates.
+        subtitle_y_ratio = max(0.0, min(1.0, float(subtitle_y_ratio)))
 
     primary = _ass_color_from_rgb_hex(base_color)
 
     style_parts = [
         "[Script Info]",
         "ScriptType: v4.00+",
-        "PlayResX: 1920",
-        "PlayResY: 1080",
+        f"PlayResX: {play_res_x}",
+        f"PlayResY: {play_res_y}",
         "ScaledBorderAndShadow: yes",
         "",
         "[V4+ Styles]",
@@ -91,7 +110,7 @@ def build_ass(
         "Style: Default,"
         f"{fontname},{font_size},{primary},&H00000000,&H00000000,&H64000000,"
         "0,0,0,0,100,100,0,0,1,"
-        f"{outline},{shadow},2,80,80,60,1"
+        f"{outline},{shadow},2,{margin_l},{margin_r},{margin_v},1"
     )
 
     style_parts += ["", "[Events]", "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"]
@@ -113,7 +132,16 @@ def build_ass(
 
         # Base animation: fade + slight scale-in using \t.
         # \fscx/\fscy are percentages.
-        anim = rf"{{\fad({fi},{fo})\fscx{scale_from}\fscy{scale_from}\t(0,{min(200, dur_ms)},\fscx{scale_to}\fscy{scale_to})}}"
+        pos = ""
+        if subtitle_y_ratio is not None:
+            cx = int(round(play_res_x / 2))
+            cy = int(round(play_res_y * float(subtitle_y_ratio)))
+            # Keep horizontal center; anchor at bottom-center so multi-line subtitles grow upward.
+            pos = rf"\an2\pos({cx},{cy})"
+        anim = (
+            rf"{{{pos}\fad({fi},{fo})\fscx{scale_from}\fscy{scale_from}"
+            rf"\t(0,{min(200, dur_ms)},\fscx{scale_to}\fscy{scale_to})}}"
+        )
         line = f"Dialogue: 0,{_fmt_time(start_ms)},{_fmt_time(end_ms)},Default,,0,0,0,,{anim}{text}"
         events.append(line)
 

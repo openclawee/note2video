@@ -22,13 +22,7 @@ class SubtitleSegment:
     text: str
 
 
-def generate_subtitles(
-    input_json: str,
-    output_dir: str,
-    *,
-    subtitle_size: int | None = None,
-    max_lines: int = 2,
-) -> dict[str, Any]:
+def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
     input_path = Path(input_json)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -43,13 +37,12 @@ def generate_subtitles(
 
     scripts = _load_scripts(input_path)
     manifest = _load_manifest(manifest_path)
-    wrap = _SubtitleWrapConfig.from_subtitle_size(subtitle_size, max_lines=max_lines)
     timing_segments = _load_timing_segments(project_dir, manifest)
     if timing_segments is not None:
-        segments = _build_segments_from_timings(timing_segments, wrap=wrap)
+        segments = _build_segments_from_timings(timing_segments)
     else:
         durations = _load_slide_durations(manifest)
-        segments = _build_segments(scripts=scripts, durations=durations, wrap=wrap)
+        segments = _build_segments(scripts=scripts, durations=durations)
     srt_path = subtitles_dir / "subtitles.srt"
     ass_path = subtitles_dir / "subtitles.ass"
     json_path = subtitles_dir / "subtitles.json"
@@ -133,7 +126,6 @@ def _build_segments(
     *,
     scripts: list[dict[str, Any]],
     durations: dict[int, int],
-    wrap: "_SubtitleWrapConfig",
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     cursor_ms = 0
@@ -166,7 +158,7 @@ def _build_segments(
         sentence_start = cursor_ms
         for sentence, duration in zip(sentences, segment_durations):
             sentence_end = sentence_start + duration
-            sentence = _wrap_subtitle_text(sentence, wrap=wrap)
+            sentence = _wrap_subtitle_text(sentence)
             segments.append(
                 SubtitleSegment(
                     index=index,
@@ -186,13 +178,11 @@ def _build_segments(
 
 def _build_segments_from_timings(
     timing_segments: list[dict[str, Any]],
-    *,
-    wrap: "_SubtitleWrapConfig",
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     for item in timing_segments:
         page = int(item["page"])
-        text = _wrap_subtitle_text(str(item.get("text", "")), wrap=wrap)
+        text = _wrap_subtitle_text(str(item.get("text", "")))
         segments.append(
             SubtitleSegment(
                 index=int(item["index"]),
@@ -215,33 +205,7 @@ def _split_sentences(text: str) -> list[str]:
     return parts
 
 
-class _SubtitleWrapConfig:
-    def __init__(self, *, max_chars_per_line: int, max_lines: int) -> None:
-        self.max_chars_per_line = int(max_chars_per_line)
-        self.max_lines = int(max_lines)
-
-    @staticmethod
-    def from_subtitle_size(subtitle_size: int | None, *, max_lines: int) -> "_SubtitleWrapConfig":
-        """
-        Heuristic mapping from font size (1080p) to max characters per line.
-
-        Baseline: 48px font ≈ 18 chars/line (tuned for 1920x1080 with typical margins).
-        """
-        try:
-            size = int(subtitle_size) if subtitle_size is not None else 0
-        except Exception:
-            size = 0
-
-        if size <= 0:
-            return _SubtitleWrapConfig(max_chars_per_line=18, max_lines=max_lines)
-
-        # Inverse scale around the baseline: bigger font → fewer chars per line.
-        est = int(round(18 * 48 / max(size, 8)))
-        est = max(10, min(30, est))
-        return _SubtitleWrapConfig(max_chars_per_line=est, max_lines=max_lines)
-
-
-def _wrap_subtitle_text(text: str, *, wrap: _SubtitleWrapConfig) -> str:
+def _wrap_subtitle_text(text: str, *, max_chars_per_line: int = 18, max_lines: int = 4) -> str:
     """
     Wrap a subtitle sentence into at most `max_lines` lines.
 
@@ -254,8 +218,6 @@ def _wrap_subtitle_text(text: str, *, wrap: _SubtitleWrapConfig) -> str:
     # Preserve explicit newlines from upstream.
     if "\n" in t:
         return "\n".join(line.strip() for line in t.splitlines() if line.strip())
-    max_chars_per_line = int(wrap.max_chars_per_line)
-    max_lines = int(wrap.max_lines)
     if max_chars_per_line <= 0 or max_lines <= 1:
         return t
     if len(t) <= max_chars_per_line:
@@ -284,9 +246,7 @@ def _wrap_subtitle_text(text: str, *, wrap: _SubtitleWrapConfig) -> str:
         return first
 
     if max_lines == 2:
-        # If still too long, hard-wrap the second line once.
-        if len(second) > max_chars_per_line:
-            second = second[:max_chars_per_line].rstrip() + "…"
+        # Legacy: keep behavior for explicit max_lines=2 callers (but do not truncate).
         return first + "\n" + second
 
     # Generic multi-line wrapping fallback.
@@ -299,8 +259,7 @@ def _wrap_subtitle_text(text: str, *, wrap: _SubtitleWrapConfig) -> str:
             break
         lines.append(rest[:max_chars_per_line].rstrip())
         rest = rest[max_chars_per_line:].lstrip()
-    if rest:
-        lines[-1] = (lines[-1].rstrip() + "…").rstrip()
+    # If `rest` is still not empty here, we simply drop it (no ellipsis) to avoid truncation markers.
     return "\n".join(lines)
 
 

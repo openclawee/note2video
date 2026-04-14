@@ -14,10 +14,144 @@ class RenderError(RuntimeError):
     """Raised when final video rendering fails."""
 
 
+def _normalize_ratio(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "16:9"
+    raw = raw.replace("：", ":").replace("x", ":")
+    raw = raw.replace(" ", "")
+    if raw in {"16:9", "9:16", "1:1"}:
+        return raw
+    raise RenderError(f"Unsupported ratio: {value!r}. Use 16:9, 9:16, or 1:1.")
+
+
+def _ratio_canvas_size(ratio: str) -> tuple[int, int]:
+    r = _normalize_ratio(ratio)
+    if r == "16:9":
+        return 1920, 1080
+    if r == "9:16":
+        return 1080, 1920
+    return 1080, 1080
+
+
+def _wrap_config_from_subtitle_size(subtitle_size: int | None) -> tuple[int, int]:
+    """
+    Heuristic mapping from font size (1080p) to (max_chars_per_line, max_lines).
+
+    Baseline: 48px font ≈ 18 chars/line (tuned for 1920x1080 with typical margins).
+    """
+    try:
+        size = int(subtitle_size) if subtitle_size is not None else 0
+    except Exception:
+        size = 0
+    if size <= 0:
+        return 18, 4
+    est = int(round(18 * 48 / max(size, 8)))
+    est = max(10, min(30, est))
+    return est, 4
+
+
+def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int) -> str:
+    t = (text or "").replace("\r", "\n").strip()
+    if not t:
+        return ""
+    # Preserve explicit newlines from upstream.
+    if "\n" in t:
+        return "\n".join(line.strip() for line in t.splitlines() if line.strip())
+    if max_chars_per_line <= 0 or max_lines <= 1:
+        return t
+    if len(t) <= max_chars_per_line:
+        return t
+
+    preferred_breaks = "，,、：:；;。！？!?"
+    target = min(len(t) - 1, max_chars_per_line)
+    best = -1
+    best_score = 10**9
+    for i, ch in enumerate(t[:-1], start=1):
+        if ch not in preferred_breaks and ch != " ":
+            continue
+        score = abs(i - target)
+        if score < best_score:
+            best = i
+            best_score = score
+    if best <= 0:
+        best = max_chars_per_line
+
+    first = t[:best].rstrip()
+    second = t[best:].lstrip()
+    if not second:
+        return first
+    if max_lines == 2:
+        return first + "\n" + second
+
+    lines: list[str] = [first]
+    rest = second
+    while rest and len(lines) < max_lines:
+        if len(rest) <= max_chars_per_line:
+            lines.append(rest)
+            rest = ""
+            break
+        lines.append(rest[:max_chars_per_line].rstrip())
+        rest = rest[max_chars_per_line:].lstrip()
+    # If `rest` is still not empty here, we simply drop it (no ellipsis) to avoid truncation markers.
+    return "\n".join(lines)
+
+
+def _load_subtitle_segments_wrapped(
+    *,
+    subtitle_json_path: Path,
+    subtitle_size: int | None,
+) -> list[dict[str, Any]]:
+    payload = json.loads(subtitle_json_path.read_text(encoding="utf-8"))
+    base_segments = payload.get("segments") or []
+    if not isinstance(base_segments, list):
+        return []
+    max_chars, max_lines = _wrap_config_from_subtitle_size(subtitle_size)
+    out: list[dict[str, Any]] = []
+    for seg in base_segments:
+        if not isinstance(seg, dict):
+            continue
+        seg2 = dict(seg)
+        seg2["text"] = _wrap_subtitle_text(
+            str(seg2.get("text", "") or ""),
+            max_chars_per_line=max_chars,
+            max_lines=max_lines,
+        )
+        out.append(seg2)
+    return out
+
+
+def _render_srt_from_segments(segments: list[dict[str, Any]]) -> str:
+    def _fmt(ms: int) -> str:
+        ms = int(ms)
+        if ms < 0:
+            ms = 0
+        hours, rem = divmod(ms, 3_600_000)
+        minutes, rem = divmod(rem, 60_000)
+        seconds, millis = divmod(rem, 1000)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+    blocks: list[str] = []
+    idx = 1
+    for seg in segments:
+        try:
+            start_ms = int(seg.get("start_ms", 0))
+            end_ms = int(seg.get("end_ms", 0))
+        except Exception:
+            continue
+        if end_ms <= start_ms:
+            continue
+        text = str(seg.get("text", "") or "").replace("\r", "")
+        blocks.append("\n".join([str(idx), f"{_fmt(start_ms)} --> {_fmt(end_ms)}", text]))
+        idx += 1
+    return "\n\n".join(blocks) + "\n"
+
+
 def render_video(
     project_dir: str,
     output_path: str | None = None,
     *,
+    ratio: str | None = None,
     bgm_path: str | None = None,
     bgm_volume: float = 0.18,
     narration_volume: float = 1.0,
@@ -32,6 +166,7 @@ def render_video(
     subtitle_shadow: int | None = None,
     subtitle_font: str | None = None,
     subtitle_size: int | None = None,
+    subtitle_y_ratio: float | None = None,
 ) -> dict[str, Any]:
     root = Path(project_dir)
     manifest_path = root / "manifest.json"
@@ -42,6 +177,9 @@ def render_video(
     slides = manifest.get("slides", [])
     if not slides:
         raise RenderError("No slides found in manifest.")
+
+    normalized_ratio = _normalize_ratio(ratio or manifest.get("ratio"))
+    canvas_w, canvas_h = _ratio_canvas_size(normalized_ratio)
 
     audio_path = root / manifest.get("outputs", {}).get("merged_audio", "audio/merged.wav")
     if not audio_path.exists():
@@ -75,10 +213,39 @@ def render_video(
     ):
         use_ass_effects = True
 
+    # Wrap subtitles based on font size at render time.
+    # This keeps text layout consistent even if subtitles were generated earlier with different settings.
+    if subtitle_json_path.exists():
+        wrapped_segments = _load_subtitle_segments_wrapped(
+            subtitle_json_path=subtitle_json_path,
+            subtitle_size=subtitle_size,
+        )
+        if wrapped_segments:
+            subtitles_dir = root / "subtitles"
+            subtitles_dir.mkdir(parents=True, exist_ok=True)
+            if use_ass_effects:
+                # ASS will be generated below using wrapped segments.
+                pass
+            else:
+                wrapped_srt = subtitles_dir / "subtitles.wrapped.srt"
+                wrapped_srt.write_text(_render_srt_from_segments(wrapped_segments), encoding="utf-8")
+                subtitle_path = wrapped_srt
+
     if use_ass_effects and subtitle_json_path.exists():
-        segments = _load_subtitle_segments_for_ass(subtitle_json_path=subtitle_json_path)
+        segments = _load_subtitle_segments_wrapped(
+            subtitle_json_path=subtitle_json_path,
+            subtitle_size=subtitle_size,
+        )
         ass_out = root / "subtitles" / "subtitles.effects.ass"
         ass_out.parent.mkdir(parents=True, exist_ok=True)
+        # Scale ASS play resolution and margins to match the actual output canvas,
+        # so multi-line subtitles don't drift out of bounds on 9:16 / 1:1.
+        base_w = 1920
+        scale_w = float(canvas_w) / float(base_w)
+        margin_lr = max(24, int(round(80 * scale_w)))
+        fs = int(subtitle_size if subtitle_size is not None else 48)
+        # Larger font / more lines → push baseline upward with a bigger bottom margin.
+        margin_v = max(int(round(fs * 1.1)), int(round(60 * (float(canvas_h) / 1080.0))))
         ass_text = build_ass(
             segments=segments,
             base_color=subtitle_color or "#FFFFFF",
@@ -90,6 +257,12 @@ def render_video(
             shadow=subtitle_shadow if subtitle_shadow is not None else 0,
             font=subtitle_font or "",
             font_size=subtitle_size if subtitle_size is not None else 48,
+            play_res_x=canvas_w,
+            play_res_y=canvas_h,
+            margin_l=margin_lr,
+            margin_r=margin_lr,
+            margin_v=margin_v,
+            subtitle_y_ratio=subtitle_y_ratio,
         )
         ass_out.write_text(ass_text, encoding="utf-8")
         subtitle_path = ass_out
@@ -164,8 +337,8 @@ def render_video(
             "-vf",
             # Standardize output to 1080p for predictable subtitle sizing.
             # Keep aspect ratio and pad to avoid stretching.
-            "scale=1920:1080:force_original_aspect_ratio=decrease,"
-            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+            f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
+            f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,"
             "setsar=1,"
             "fps=30,format=yuv420p",
             "-r",
@@ -227,13 +400,17 @@ def render_video(
         _run_ffmpeg(mux_command + [str(target_video)])
 
     outputs = manifest.setdefault("outputs", {})
+    manifest["ratio"] = normalized_ratio
     outputs["video"] = _relative_path(root, target_video)
     outputs["video_subtitles_burned"] = subtitle_burned
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     _cleanup_render_intermediates(temp_video=temp_video, concat_file=concat_file)
 
     (logs_dir / "render.log").write_text(
-        f"video: {target_video}\nsubtitles_burned: {subtitle_burned}\n"
+        f"video: {target_video}\n"
+        f"ratio: {normalized_ratio}\n"
+        f"canvas: {canvas_w}x{canvas_h}\n"
+        f"subtitles_burned: {subtitle_burned}\n"
         f"audio: {mux_audio_path}\n"
         f"mixed: {mix_used}\n"
         f"{mix_info}",
@@ -357,6 +534,7 @@ def _load_subtitle_segments_for_ass(
     *,
     subtitle_json_path: Path,
 ) -> list[dict[str, Any]]:
+    # Backward-compatible alias: kept for older imports/tests.
     payload = json.loads(subtitle_json_path.read_text(encoding="utf-8"))
     base_segments = payload.get("segments") or []
     if not isinstance(base_segments, list):

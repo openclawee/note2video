@@ -235,16 +235,17 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr("note2video.render.video._run_ffmpeg", fake_run_ffmpeg)
 
-    exit_code = main(["render", str(project_dir), "--json"])
+    exit_code = main(["render", str(project_dir), "--ratio", "9:16", "--json"])
 
     assert exit_code == 0
     manifest = json.loads((project_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["outputs"]["video"] == "video/output.mp4"
+    assert manifest["ratio"] == "9:16"
     assert (project_dir / "video" / "output.mp4").exists()
     first_command = commands[0]
     # 1080p standardization filter is applied before fps/format.
     assert any("fps=30,format=yuv420p" in str(x) for x in first_command)
-    assert any("scale=1920:1080" in str(x) for x in first_command)
+    assert any("scale=1080:1920" in str(x) for x in first_command)
     assert "vfr" not in first_command
     assert not (project_dir / "video" / "video_only.mp4").exists()
     assert not (project_dir / "video" / "slides.ffconcat").exists()
@@ -262,10 +263,33 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
         scripts_dir = output_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
         (scripts_dir / "script.json").write_text('{"slides":[]}', encoding="utf-8")
+        # Minimal manifest so build can map pages when overriding script.
+        (output_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "project_name": "demo",
+                    "input_file": str(input_file),
+                    "slide_count": 3,
+                    "outputs": {},
+                    "slides": [
+                        {"page": 1, "title": "A"},
+                        {"page": 2, "title": "B"},
+                        {"page": 3, "title": "C"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
         return SimpleNamespace(slide_count=3)
 
     def fake_voice(input_json, out_dir, *, provider_name="pyttsx3", voice_id="", tts_rate=1.0, minimax_base_url=None):
         calls.append(("voice", input_json, out_dir, provider_name, voice_id, tts_rate, minimax_base_url))
+        # Ensure script override has been written before voice stage runs.
+        payload = json.loads(Path(input_json).read_text(encoding="utf-8"))
+        assert payload["slides"][0]["script"] == "S1"
+        assert payload["slides"][1]["script"] == "S2"
+        assert payload["slides"][2]["script"] == "S3"
         return {"provider": provider_name, "slide_count": 3, "tts_rate": tts_rate}
 
     def fake_subtitle(input_json, out_dir):
@@ -276,15 +300,29 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
         project_dir,
         output_path=None,
         *,
+        ratio="16:9",
         bgm_path=None,
         bgm_volume=0.18,
         bgm_fade_in_s=0.0,
         bgm_fade_out_s=0.0,
         narration_volume=1.0,
         subtitle_color=None,
+        subtitle_y_ratio=None,
+        **_kwargs,
     ):
         calls.append(
-            ("render", project_dir, bgm_path, bgm_volume, bgm_fade_in_s, bgm_fade_out_s, narration_volume, subtitle_color)
+            (
+                "render",
+                project_dir,
+                ratio,
+                bgm_path,
+                bgm_volume,
+                bgm_fade_in_s,
+                bgm_fade_out_s,
+                narration_volume,
+                subtitle_color,
+                subtitle_y_ratio,
+            )
         )
         return {"video": "video/output.mp4", "subtitles_burned": True}
 
@@ -303,6 +341,8 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
             "1-3",
             "--tts-provider",
             "pyttsx3",
+            "--script-text",
+            "S1\n\nS2\n\nS3",
             "--json",
         ]
     )
@@ -311,7 +351,7 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
     assert calls[0] == ("extract", str(input_file), str(output_dir), "1-3")
     assert calls[1][0] == "voice"
     assert calls[2][0] == "subtitle"
-    assert calls[3] == ("render", str(output_dir), None, 0.18, 0.0, 0.0, 1.0, None)
+    assert calls[3] == ("render", str(output_dir), "16:9", None, 0.18, 0.0, 0.0, 1.0, None, None)
 
 
 def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:
@@ -390,6 +430,30 @@ def test_extract_command_filters_pages(tmp_path, monkeypatch) -> None:
     # Ensure we didn't generate slide images for excluded pages.
     slides_dir = output_dir / "slides"
     assert (slides_dir / "002.png").exists() is False
+
+
+def test_extract_accepts_pdf_and_writes_placeholders(tmp_path, monkeypatch) -> None:
+    # Create a minimal 2-page PDF.
+    from pypdf import PdfWriter
+
+    input_file = tmp_path / "demo.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=612, height=792)
+    writer.add_blank_page(width=612, height=792)
+    with input_file.open("wb") as f:
+        writer.write(f)
+
+    # Force placeholder path (no PyMuPDF + no pdftoppm).
+    monkeypatch.setattr("note2video.parser.extract._find_pdftoppm", lambda: None)
+    monkeypatch.setitem(__import__("sys").modules, "fitz", None)
+
+    output_dir = tmp_path / "dist"
+    exit_code = main(["extract", str(input_file), "--out", str(output_dir), "--pages", "1"])
+    assert exit_code == 0
+
+    manifest = json.loads((output_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["slide_count"] == 1
+    assert (output_dir / "slides" / "001.png").exists()
 
 
 def test_extract_command_openxml_fallback_on_linux(tmp_path, monkeypatch) -> None:

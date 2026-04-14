@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from note2video.app.pipeline_service import BuildRequest
-from note2video.gui.app import JobConfig, _build_request_from_job_config, _run_extract_or_build
+from note2video.gui.app import JobConfig, _build_cli_argv_for_config, _build_request_from_job_config, _run_extract_or_build
 
 
 def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
@@ -12,6 +12,7 @@ def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
         pptx_path=tmp_path / "demo.pptx",
         out_dir=tmp_path / "dist",
         pages="all",
+        ratio="16:9",
         tts_provider="edge",
         voice_id="",
         tts_rate=1.0,
@@ -87,6 +88,7 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
         pptx_path=tmp_path / "demo.pptx",
         out_dir=tmp_path / "dist",
         pages="1-3",
+        ratio="9:16",
         tts_provider="edge",
         voice_id="zh-CN-XiaoxiaoNeural",
         tts_rate=1.25,
@@ -111,6 +113,7 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
     assert req.input_file.endswith("demo.pptx")
     assert req.out_dir.endswith("dist")
     assert req.pages == "1-3"
+    assert req.ratio == "9:16"
     assert req.tts_provider == "edge"
     assert req.voice_id == "zh-CN-XiaoxiaoNeural"
     assert req.tts_rate == 1.25
@@ -127,6 +130,54 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
     assert req.narration_volume == 0.95
     assert req.bgm_fade_in_s == 0.5
     assert req.bgm_fade_out_s == 1.0
+
+
+def test_build_cli_argv_includes_script_file_when_temp_path_set(tmp_path) -> None:
+    script_path = tmp_path / "override.txt"
+    script_path.write_text("hello", encoding="utf-8")
+    cfg = JobConfig(
+        mode="build",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=tmp_path / "dist",
+        pages="all",
+        ratio="1:1",
+        tts_provider="edge",
+        voice_id="",
+        tts_rate=1.0,
+        script_text="ignored when temp path set",
+        script_temp_path=str(script_path),
+        subtitle_y_ratio=0.88,
+    )
+    argv = _build_cli_argv_for_config(cfg)
+    assert argv[1:3] == ["-X", "utf8"]
+    assert "--ratio" in argv
+    r = argv[argv.index("--ratio") + 1]
+    assert r == "1:1"
+    assert "--subtitle-y-ratio" in argv
+    y = float(argv[argv.index("--subtitle-y-ratio") + 1])
+    assert abs(y - 0.88) < 1e-9
+    assert "--script-file" in argv
+    i = argv.index("--script-file")
+    assert Path(argv[i + 1]).resolve() == script_path.resolve()
+
+
+def test_build_request_prefers_script_file_over_script_text(tmp_path) -> None:
+    p = tmp_path / "s.txt"
+    p.write_text("from file", encoding="utf-8")
+    cfg = JobConfig(
+        mode="build",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=tmp_path / "dist",
+        pages="all",
+        tts_provider="edge",
+        voice_id="",
+        tts_rate=1.0,
+        script_text="from ui",
+        script_temp_path=str(p),
+    )
+    req = _build_request_from_job_config(cfg)
+    assert req.script_file == str(p)
+    assert req.script_text is None
 
 
 def test_run_pipeline_with_log_returns_error_and_trace_on_failure(monkeypatch, tmp_path) -> None:

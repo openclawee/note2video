@@ -43,8 +43,9 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     input_path = Path(input_file)
     if not input_path.exists():
         raise FileNotFoundError(f"Input file not found: {input_path}")
-    if input_path.suffix.lower() != ".pptx":
-        raise ValueError("Only .pptx input is supported.")
+    suffix = input_path.suffix.lower()
+    if suffix not in {".pptx", ".pdf"}:
+        raise ValueError("Only .pptx and .pdf inputs are supported.")
 
     out_dir = Path(output_dir)
     slides_dir = out_dir / "slides"
@@ -64,17 +65,26 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     scripts_txt_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Prefer counting slides without exporting images, so page selection doesn't generate all slide PNGs.
-    # If counting fails (e.g. tests using a placeholder file), fall back to extraction-driven counting.
-    try:
-        total_slides = _count_slides_openxml(input_path)
-        selected_pages = _parse_page_selection(pages, total_slides=total_slides)
-        slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=selected_pages)
-    except Exception:
-        slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=None)
-        selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
-        if selected_pages is not None:
-            slide_data = [item for item in slide_data if item["page"] in selected_pages]
+    if suffix == ".pdf":
+        total_pages = _count_pdf_pages(input_path)
+        selected_pages = _parse_page_selection(pages, total_slides=total_pages)
+        slide_data, extractor = _extract_pdf_slide_data(
+            input_path,
+            slides_dir,
+            selected_pages=selected_pages,
+        )
+    else:
+        # Prefer counting slides without exporting images, so page selection doesn't generate all slide PNGs.
+        # If counting fails (e.g. tests using a placeholder file), fall back to extraction-driven counting.
+        try:
+            total_slides = _count_slides_openxml(input_path)
+            selected_pages = _parse_page_selection(pages, total_slides=total_slides)
+            slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=selected_pages)
+        except Exception:
+            slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=None)
+            selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
+            if selected_pages is not None:
+                slide_data = [item for item in slide_data if item["page"] in selected_pages]
 
     slides: list[SlideRecord] = []
     for item in slide_data:
@@ -165,6 +175,105 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
     )
 
     return manifest
+
+
+def _count_pdf_pages(input_path: Path) -> int:
+    try:
+        from pypdf import PdfReader  # type: ignore
+    except Exception as exc:  # pragma: no cover
+        raise PowerPointUnavailableError("pypdf is required to read PDF page counts.") from exc
+    reader = PdfReader(str(input_path))
+    return int(len(reader.pages))
+
+
+def _extract_pdf_slide_data(
+    input_path: Path,
+    slides_dir: Path,
+    *,
+    selected_pages: set[int] | None,
+) -> tuple[list[dict[str, Any]], str]:
+    """
+    Convert a PDF to per-page PNG slides.
+
+    Notes are not available in PDFs, so raw_notes are empty and script is empty.
+    """
+    total_pages = _count_pdf_pages(input_path)
+    pages = list(range(1, total_pages + 1))
+    if selected_pages is not None:
+        pages = [p for p in pages if p in selected_pages]
+
+    # Prefer a pure-Python renderer (PyMuPDF) so users don't need to install Poppler.
+    # PyMuPDF is AGPL; ensure this is acceptable for your distribution.
+    pymupdf_ok = False
+    try:
+        import fitz  # PyMuPDF
+
+        pymupdf_ok = True
+    except Exception:
+        pymupdf_ok = False
+
+    if pymupdf_ok:
+        import fitz  # type: ignore[no-redef]
+
+        dpi = float(os.environ.get("NOTE2VIDEO_PDF_RENDER_DPI", "150").strip() or "150")
+        zoom = max(0.5, min(6.0, dpi / 72.0))
+        doc = fitz.open(str(input_path))
+        try:
+            for page in pages:
+                p = doc.load_page(page - 1)
+                mat = fitz.Matrix(zoom, zoom)
+                pix = p.get_pixmap(matrix=mat, alpha=False)
+                dest = slides_dir / f"{page:03d}.png"
+                pix.save(str(dest))
+        finally:
+            try:
+                doc.close()
+            except Exception:
+                pass
+        extractor = "pdf-pymupdf"
+    else:
+        pdftoppm = _find_pdftoppm()
+        if pdftoppm:
+            # Render to a temp directory, then copy/rename into slides_dir as 001.png etc.
+            work_dir = Path(tempfile.mkdtemp(prefix="note2video-pdf-"))
+            try:
+                prefix = work_dir / "page"
+                dpi = os.environ.get("NOTE2VIDEO_PDF_RENDER_DPI", "150").strip() or "150"
+                _run_tool(
+                    [pdftoppm, "-png", "-r", dpi, str(input_path.resolve()), str(prefix)],
+                    timeout=int(os.environ.get("NOTE2VIDEO_PDFTOPPM_TIMEOUT", "180")),
+                    label="pdftoppm (pdf to png)",
+                )
+                rendered = sorted(work_dir.glob("page-*.png"), key=lambda p: _pdftoppm_page_index(p.name))
+                by_index = {(_pdftoppm_page_index(p.name)): p for p in rendered}
+                for page in pages:
+                    src = by_index.get(page)
+                    dest = slides_dir / f"{page:03d}.png"
+                    if src and src.exists():
+                        shutil.copy2(src, dest)
+                    else:
+                        _write_placeholder_slide_png(dest, page=page, title="")
+            finally:
+                shutil.rmtree(work_dir, ignore_errors=True)
+            extractor = "pdf-pdftoppm"
+        else:
+            # Fallback: generate placeholder PNGs so the pipeline can still run.
+            for page in pages:
+                _write_placeholder_slide_png(slides_dir / f"{page:03d}.png", page=page, title="PDF (placeholder)")
+            extractor = "pdf-placeholder"
+
+    records: list[dict[str, Any]] = []
+    for page in pages:
+        image_name = f"{page:03d}.png"
+        records.append(
+            {
+                "page": page,
+                "title": "",
+                "image": f"slides/{image_name}",
+                "raw_notes": "",
+            }
+        )
+    return records, extractor
 
 
 def _extract_slide_data(
@@ -603,16 +712,43 @@ def _extract_openxml_shape_text(shape: ET.Element) -> str:
 
 def _write_placeholder_slide_png(image_path: Path, *, page: int, title: str) -> None:
     try:
-        from PIL import Image, ImageDraw
+        from PIL import Image, ImageDraw, ImageFont
     except ImportError as exc:  # pragma: no cover - dependency is declared in pyproject
         raise PowerPointUnavailableError("Pillow is required to generate slide placeholders.") from exc
 
-    image = Image.new("RGB", (1280, 720), color=(250, 250, 250))
+    image = Image.new("RGB", (1280, 720), color=(245, 247, 255))
     drawer = ImageDraw.Draw(image)
-    drawer.rectangle((60, 60, 1220, 660), outline=(220, 220, 220), width=3)
-    drawer.text((100, 110), f"Slide {page:03d}", fill=(25, 25, 25))
+    drawer.rectangle((50, 50, 1230, 670), outline=(80, 90, 120), width=4)
+
+    def _load_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        # Try common Windows fonts for better readability; fall back to default bitmap font.
+        candidates = [
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\msyh.ttc",
+        ]
+        for p in candidates:
+            try:
+                if Path(p).exists():
+                    return ImageFont.truetype(p, size=size)
+            except Exception:
+                continue
+        try:
+            return ImageFont.load_default()
+        except Exception:
+            return ImageFont.load_default()
+
+    font_big = _load_font(64)
+    font_small = _load_font(28)
+    drawer.text((90, 120), f"SLIDE {page:03d}", fill=(15, 20, 35), font=font_big)
     if title:
-        drawer.text((100, 170), title[:120], fill=(50, 50, 50))
+        drawer.text((90, 220), str(title)[:140], fill=(35, 45, 70), font=font_small)
+    drawer.text(
+        (90, 620),
+        "Placeholder image (install PyMuPDF or Poppler pdftoppm for real PDF rendering)",
+        fill=(50, 55, 65),
+        font=_load_font(18),
+    )
     image.save(image_path, format="PNG")
 
 

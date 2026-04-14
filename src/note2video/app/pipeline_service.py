@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 from typing import Any, Callable
 
@@ -15,9 +16,12 @@ class BuildRequest:
     input_file: str
     out_dir: str
     pages: str = "all"
+    ratio: str = "16:9"
     tts_provider: str = "pyttsx3"
     voice_id: str = ""
     tts_rate: float = 1.0
+    script_text: str | None = None
+    script_file: str | None = None
     bgm_path: str | None = None
     bgm_volume: float = 0.18
     bgm_fade_in_s: float = 0.0
@@ -32,6 +36,7 @@ class BuildRequest:
     subtitle_shadow: int = 0
     subtitle_font: str | None = None
     subtitle_size: int | None = None
+    subtitle_y_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,7 @@ class SubtitleRequest:
 class RenderRequest:
     project_dir: str
     output_path: str | None = None
+    ratio: str = "16:9"
     bgm_path: str | None = None
     bgm_volume: float = 0.18
     bgm_fade_in_s: float = 0.0
@@ -80,6 +86,7 @@ class RenderRequest:
     subtitle_shadow: int = 0
     subtitle_font: str | None = None
     subtitle_size: int | None = None
+    subtitle_y_ratio: float | None = None
 
 
 class PipelineServiceError(RuntimeError):
@@ -117,6 +124,7 @@ class PipelineService:
         return render_video(
             request.project_dir,
             request.output_path,
+            ratio=request.ratio,
             bgm_path=request.bgm_path,
             bgm_volume=float(request.bgm_volume),
             bgm_fade_in_s=float(request.bgm_fade_in_s),
@@ -131,6 +139,7 @@ class PipelineService:
             subtitle_shadow=int(request.subtitle_shadow),
             subtitle_font=request.subtitle_font,
             subtitle_size=request.subtitle_size,
+            subtitle_y_ratio=request.subtitle_y_ratio,
         )
 
 
@@ -146,6 +155,18 @@ def run_build_pipeline(
     manifest = extract_project_fn(request.input_file, str(out_dir), pages=request.pages)
     script_path = out_dir / "scripts" / "script.json"
 
+    script_override = _resolve_script_override_text(request)
+    if script_override is not None and str(script_override).strip():
+        slide_count = int(getattr(manifest, "slide_count", 0) or 0)
+        manifest_path = out_dir / "manifest.json"
+        slides_meta = _load_manifest_slides_meta(manifest_path) if manifest_path.exists() else None
+        _write_script_override(
+            script_path=script_path,
+            slides_meta=slides_meta,
+            slide_count=slide_count,
+            script_text=str(script_override),
+        )
+
     voice_result = generate_voice_assets_fn(
         str(script_path),
         str(out_dir),
@@ -154,16 +175,9 @@ def run_build_pipeline(
         tts_rate=request.tts_rate,
         minimax_base_url=None,
     )
-    try:
-        subtitle_result = generate_subtitles_fn(
-            str(script_path),
-            str(out_dir),
-            subtitle_size=request.subtitle_size,
-        )
-    except TypeError:
-        # Backward-compatibility for tests/mocks that still use the older subtitle signature.
-        subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
+    subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
     render_kwargs = {
+        "ratio": request.ratio,
         "bgm_path": request.bgm_path,
         "bgm_volume": float(request.bgm_volume),
         "bgm_fade_in_s": float(request.bgm_fade_in_s),
@@ -180,6 +194,7 @@ def run_build_pipeline(
         "subtitle_shadow": int(request.subtitle_shadow),
         "subtitle_font": request.subtitle_font,
         "subtitle_size": request.subtitle_size,
+        "subtitle_y_ratio": request.subtitle_y_ratio,
     }
     try:
         render_result = render_video_fn(str(out_dir), **render_kwargs, **advanced_kwargs)
@@ -205,6 +220,140 @@ def run_build_pipeline(
         "subtitles_burned": bool(render_result["subtitles_burned"]),
         "mixed_audio": bool(render_result.get("mixed_audio")),
     }
+
+
+def _resolve_script_override_text(request: BuildRequest) -> str | None:
+    """
+    Determine script override input.
+
+    Priority:
+    - explicit script_text
+    - script_file contents (utf-8)
+    """
+    if request.script_text is not None and str(request.script_text).strip():
+        return str(request.script_text)
+    if request.script_file is not None and str(request.script_file).strip():
+        path = Path(str(request.script_file))
+        return path.read_text(encoding="utf-8")
+    return None
+
+
+def _load_manifest_slides_meta(manifest_path: Path) -> list[dict[str, Any]] | None:
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    slides = payload.get("slides")
+    if not isinstance(slides, list):
+        return None
+    out: list[dict[str, Any]] = []
+    for s in slides:
+        if not isinstance(s, dict):
+            continue
+        try:
+            page = int(s.get("page"))
+        except Exception:
+            continue
+        out.append({"page": page, "title": str(s.get("title") or "")})
+    return out or None
+
+
+def _write_script_override(
+    *,
+    script_path: Path,
+    slides_meta: list[dict[str, Any]] | None,
+    slide_count: int,
+    script_text: str,
+) -> None:
+    """
+    Write a replacement `scripts/script.json` from user-provided script content.
+
+    Accepted formats (auto-detected):
+    - JSON object with {"slides":[{"page":1,"title":"...","script":"..."}...]}
+    - "all.txt" format blocks starting with `--- Slide 001 ... ---`
+    - Plain text: if it splits into N blocks (blank-line separated) and N == slide_count,
+      map blocks sequentially to pages; otherwise use it as slide 1 script.
+    """
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    raw = (script_text or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if not raw.strip():
+        return
+
+    # 1) JSON passthrough if user provided a full script.json payload.
+    if raw.lstrip().startswith("{"):
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict) and isinstance(payload.get("slides"), list):
+            script_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+            return
+
+    pages: list[int]
+    titles: dict[int, str] = {}
+    if slides_meta:
+        pages = [int(x["page"]) for x in slides_meta if "page" in x]
+        for x in slides_meta:
+            try:
+                titles[int(x["page"])] = str(x.get("title") or "")
+            except Exception:
+                pass
+    else:
+        pages = list(range(1, max(1, int(slide_count or 1)) + 1))
+
+    by_page: dict[int, str] = {}
+
+    # 2) Parse `--- Slide NNN ... ---` blocks (same as scripts/all.txt).
+    import re
+
+    header_re = re.compile(r"^\s*---\s*Slide\s+(\d+)\b.*---\s*$")
+    current_page: int | None = None
+    buf: list[str] = []
+    seen_any_header = False
+    lines = raw.split("\n")
+    for line in lines:
+        m = header_re.match(line)
+        if m:
+            seen_any_header = True
+            if current_page is not None:
+                by_page[current_page] = "\n".join(buf).strip("\n")
+            buf = []
+            try:
+                current_page = int(m.group(1))
+            except Exception:
+                current_page = None
+            continue
+        if current_page is not None:
+            buf.append(line)
+    if current_page is not None:
+        by_page[current_page] = "\n".join(buf).strip("\n")
+
+    if not seen_any_header:
+        # 3) Plain text heuristic: blank-line separated blocks.
+        blocks = [b.strip("\n") for b in re.split(r"\n{2,}", raw) if b.strip()]
+        if slide_count and len(blocks) == int(slide_count):
+            for idx, page in enumerate(pages[: len(blocks)]):
+                by_page[int(page)] = blocks[idx].strip()
+        else:
+            # Fallback: treat as slide 1 script.
+            if pages:
+                by_page[int(pages[0])] = raw.strip()
+
+    slides_out: list[dict[str, Any]] = []
+    for page in pages:
+        p = int(page)
+        slides_out.append(
+            {
+                "page": p,
+                "title": titles.get(p, ""),
+                "script": str(by_page.get(p, "") or ""),
+            }
+        )
+
+    script_path.write_text(
+        json.dumps({"slides": slides_out}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def run_extract_pipeline(
@@ -291,6 +440,7 @@ def run_render_pipeline(
     result = render_video_fn(
         request.project_dir,
         request.output_path,
+        ratio=request.ratio,
         bgm_path=request.bgm_path,
         bgm_volume=float(request.bgm_volume),
         bgm_fade_in_s=float(request.bgm_fade_in_s),

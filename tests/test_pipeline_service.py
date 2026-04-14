@@ -32,13 +32,14 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
         return {"segment_count": 5}
 
     def fake_render(project_dir, output_path=None, **kwargs):
-        calls.append(("render", project_dir, output_path, kwargs.get("subtitle_fade_in_ms")))
+        calls.append(("render", project_dir, output_path, kwargs.get("subtitle_fade_in_ms"), kwargs.get("ratio")))
         return {"video": "video/output.mp4", "subtitles_burned": True, "mixed_audio": "audio/mixed.wav"}
 
     req = BuildRequest(
         input_file=str(tmp_path / "demo.pptx"),
         out_dir=str(tmp_path / "dist"),
         pages="1-3",
+        ratio="9:16",
         tts_provider="pyttsx3",
         subtitle_color=None,
     )
@@ -54,6 +55,7 @@ def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
     assert calls[1][0] == "voice"
     assert calls[2][0] == "subtitle"
     assert calls[3][0] == "render"
+    assert calls[3][4] == "9:16"
 
 
 def test_build_includes_mixed_audio_flag(tmp_path) -> None:
@@ -101,7 +103,7 @@ def test_voice_subtitle_render_delegate(monkeypatch, tmp_path) -> None:
         generate_subtitles_fn=lambda *args, **kwargs: {"slide_count": 2, "segment_count": 3},
     )
     render_result = run_render_pipeline(
-        RenderRequest(project_dir=str(tmp_path)),
+        RenderRequest(project_dir=str(tmp_path), ratio="1:1"),
         render_video_fn=lambda *args, **kwargs: {
             "video": "video/output.mp4",
             "subtitles_burned": True,

@@ -31,6 +31,19 @@ Current implementation runs (in order):
 note2video build input.pptx --out ./dist
 ```
 
+Optional: override narration script (preferred over PPT notes when provided):
+
+```bash
+# Use an existing script.json (recommended for automation)
+note2video build input.pptx --out ./dist --script-file ./my-script.json
+
+# Or paste scripts/all.txt-style content (blocks start with `--- Slide 001 ---`)
+note2video build input.pptx --out ./dist --script-file ./scripts/all.txt
+
+# Or inline text (blank-line separated blocks; if block count == slide count, maps by order)
+note2video build input.pptx --out ./dist --script-text "S1\n\nS2\n\nS3"
+```
+
 Typical outputs:
 
 - `slides/`

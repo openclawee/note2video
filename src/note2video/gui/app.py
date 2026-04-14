@@ -5,7 +5,7 @@ import sys
 import tempfile
 import traceback
 import faulthandler
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -111,6 +111,11 @@ class JobConfig:
     tts_provider: str
     voice_id: str
     tts_rate: float
+    ratio: str = "16:9"
+    # Build 且非空时覆盖 PPT 备注（与 CLI --script-text/--script-file 语义一致）。
+    script_text: str = ""
+    # 仅 QProcess：启动前写入临时文件路径，避免 Windows 命令行长度限制。
+    script_temp_path: str | None = None
     minimax_base_url: str | None = None
     subtitle_color: str | None = None
     subtitle_fade_in_ms: int | None = None
@@ -121,6 +126,7 @@ class JobConfig:
     subtitle_shadow: int | None = None
     subtitle_font: str | None = None
     subtitle_size: int | None = None
+    subtitle_y_ratio: float | None = None
     bgm_path: str | None = None
     bgm_volume: float = 0.18
     narration_volume: float = 1.0
@@ -143,11 +149,11 @@ def main(argv: list[str] | None = None) -> int:
     app.setApplicationName("Note2Video")
 
     window = MainWindow(QtCore=QtCore, QtWidgets=QtWidgets)
-    window.resize(860, 560)
+    window.resize(960, 740)
     window.show()
 
     inner = window._window
-    inner.setMinimumSize(520, 380)
+    inner.setMinimumSize(560, 420)
 
     def _position_main_window() -> None:
         if not inner.isVisible():
@@ -216,13 +222,20 @@ def _run_extract_or_build(config: JobConfig, emit_log) -> int:
 
 
 def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
+    script_file = (config.script_temp_path or "").strip() or None
+    script_text = (config.script_text or "").strip() or None
+    if script_file:
+        script_text = None
     return BuildRequest(
         input_file=str(config.pptx_path),
         out_dir=str(config.out_dir),
         pages=config.pages,
+        ratio=str(config.ratio or "16:9"),
         tts_provider="edge",
         voice_id=config.voice_id,
         tts_rate=float(config.tts_rate),
+        script_text=script_text,
+        script_file=script_file,
         bgm_path=config.bgm_path,
         bgm_volume=float(config.bgm_volume),
         narration_volume=float(config.narration_volume),
@@ -237,6 +250,7 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
         subtitle_shadow=int(config.subtitle_shadow or 0),
         subtitle_font=config.subtitle_font,
         subtitle_size=config.subtitle_size,
+        subtitle_y_ratio=config.subtitle_y_ratio,
     )
 
 
@@ -260,7 +274,8 @@ def _build_worker(QtCore, config: JobConfig):
 
 
 def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
-    argv: list[str] = [sys.executable, "-m", "note2video.cli.main"]
+    # Force UTF-8 output so GUI logs can decode reliably on Windows.
+    argv: list[str] = [sys.executable, "-X", "utf8", "-m", "note2video.cli.main"]
     if (config.mode or "").strip().lower() == "extract":
         argv += [
             "extract",
@@ -280,6 +295,8 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
         str(config.out_dir),
         "--pages",
         str(config.pages or "all"),
+        "--ratio",
+        str(config.ratio or "16:9"),
         "--tts-provider",
         "edge",
         "--voice",
@@ -316,6 +333,10 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
         str(int(config.subtitle_shadow or 0)),
         "--json",
     ]
+    if config.subtitle_y_ratio is not None:
+        argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
+    if (config.script_temp_path or "").strip():
+        argv += ["--script-file", str(Path(config.script_temp_path).resolve())]
     return argv
 
 
@@ -354,19 +375,14 @@ def _build_ui(QtWidgets, QtCore):
             self._pipeline_busy = False
             self._pipeline_stage_label: str = ""
             self._pipeline_proc: Any = None
+            self._script_override_temp_path: str | None = None
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
 
             layout = QtWidgets.QVBoxLayout(central)
-            self.tabs = QtWidgets.QTabWidget()
-            layout.addWidget(self.tabs)
-
-            build_tab = QtWidgets.QWidget()
-            self.tabs.addTab(build_tab, "制作")
-            build_tab_layout = QtWidgets.QVBoxLayout(build_tab)
             top = QtWidgets.QHBoxLayout()
-            build_tab_layout.addLayout(top)
+            layout.addLayout(top)
 
             left = QtWidgets.QVBoxLayout()
             right = QtWidgets.QVBoxLayout()
@@ -401,9 +417,16 @@ def _build_ui(QtWidgets, QtCore):
             io_grid.addWidget(QtWidgets.QLabel("页码"), 2, 0)
             io_grid.addWidget(self.pages_edit, 2, 1)
 
+            self.ratio_combo = QtWidgets.QComboBox()
+            self.ratio_combo.addItem("16:9（横屏）", "16:9")
+            self.ratio_combo.addItem("9:16（竖屏）", "9:16")
+            self.ratio_combo.addItem("1:1（方形）", "1:1")
+            self.ratio_combo.setToolTip("输出视频宽高比；会在渲染阶段按该比例进行缩放并补边（不拉伸）。")
+            io_grid.addWidget(QtWidgets.QLabel("比例"), 2, 2)
+            io_grid.addWidget(self.ratio_combo, 2, 3)
+
             # Spacer to keep grid compact
-            io_grid.addWidget(QtWidgets.QLabel(""), 2, 2)
-            io_grid.addWidget(QtWidgets.QLabel(""), 2, 3)
+            # (ratio occupies col 2-3)
 
             # --- TTS ---
             tts_group = QtWidgets.QGroupBox("配音（TTS）")
@@ -429,14 +452,9 @@ def _build_ui(QtWidgets, QtCore):
             self.voice_combo.setMinimumWidth(240)
             self.voice_combo.setMaxVisibleItems(18)
             self._voice_combo_reset_default()
-            self.voice_refresh_btn = QtWidgets.QPushButton("刷新音色")
-            self.voice_refresh_btn.setToolTip(
-                "从 Edge 拉取音色列表（需要网络）。也可手动输入 Voice ID。"
-            )
             self.voice_preview_btn = QtWidgets.QPushButton("试听")
             self.voice_preview_btn.setToolTip(f"用 Edge、音色与语速合成一句试听：{PREVIEW_SAMPLE_TEXT}")
             voice_row.addWidget(self.voice_combo, 1)
-            voice_row.addWidget(self.voice_refresh_btn)
             voice_row.addWidget(self.voice_preview_btn)
             tts_grid.addWidget(QtWidgets.QLabel("声音"), 1, 0)
             tts_grid.addLayout(voice_row, 1, 1, 1, 3)
@@ -582,6 +600,24 @@ def _build_ui(QtWidgets, QtCore):
             scale_row.addWidget(self.subtitle_scale_to_spin)
             render_grid.addLayout(scale_row, 4, 1)
 
+            # Subtitle vertical position (ratio) - optional
+            self.subtitle_y_ratio_enable = QtWidgets.QCheckBox("自定义竖向位置")
+            self.subtitle_y_ratio_enable.setToolTip("启用后用比例定位字幕竖向位置（0~1），横向恒居中。")
+            self.subtitle_y_ratio_spin = QtWidgets.QDoubleSpinBox()
+            self.subtitle_y_ratio_spin.setRange(0.0, 1.0)
+            self.subtitle_y_ratio_spin.setSingleStep(0.01)
+            self.subtitle_y_ratio_spin.setDecimals(3)
+            self.subtitle_y_ratio_spin.setValue(0.92)
+            self.subtitle_y_ratio_spin.setEnabled(False)
+            self.subtitle_y_ratio_spin.setToolTip("0=最顶部，1=最底部。建议 0.85~0.95。")
+            y_row = QtWidgets.QHBoxLayout()
+            y_row.addWidget(self.subtitle_y_ratio_enable)
+            y_row.addStretch(1)
+            y_row.addWidget(QtWidgets.QLabel("y_ratio"))
+            y_row.addWidget(self.subtitle_y_ratio_spin)
+            render_grid.addWidget(QtWidgets.QLabel("位置"), 6, 0)
+            render_grid.addLayout(y_row, 6, 1, 1, 3)
+
             self.subtitle_outline_spin = QtWidgets.QSpinBox()
             self.subtitle_outline_spin.setRange(0, 20)
             self.subtitle_outline_spin.setValue(1)
@@ -596,6 +632,25 @@ def _build_ui(QtWidgets, QtCore):
             render_grid.addLayout(os_row, 7, 1)
 
             left.addStretch(1)
+
+            # --- Optional narration script (right column, above Extract/Build) ---
+            script_group = QtWidgets.QGroupBox("旁白脚本（可选）")
+            script_outer = QtWidgets.QVBoxLayout(script_group)
+            script_btn_row = QtWidgets.QHBoxLayout()
+            self.script_load_btn = QtWidgets.QPushButton("从文件加载…")
+            self.script_load_btn.setToolTip("将 UTF-8 文本或 JSON 读入下方编辑区；Build 时若下方非空则覆盖 PPT 备注。")
+            script_btn_row.addWidget(self.script_load_btn)
+            script_btn_row.addStretch(1)
+            script_outer.addLayout(script_btn_row)
+            self.script_edit = QtWidgets.QPlainTextEdit()
+            self.script_edit.setMinimumHeight(180)
+            self.script_edit.setPlaceholderText(
+                "留空：使用 PPT 备注生成的脚本。\n"
+                "非空：一键 Build 时用此处内容配音（与命令行 --script-file/--script-text 相同规则）。\n"
+                "支持：完整 script.json、scripts/all.txt 分段格式、或按空行分段且段数=幻灯片数时逐页对齐。"
+            )
+            script_outer.addWidget(self.script_edit, 1)
+            right.addWidget(script_group, 1)
 
             # --- Buttons / Progress / Log on right ---
             buttons = QtWidgets.QHBoxLayout()
@@ -616,35 +671,12 @@ def _build_ui(QtWidgets, QtCore):
             self.progress.setFormat("就绪")
             right.addWidget(self.progress)
 
-            # --- Preview player ---
-            # NOTE: QtWebEngine is prone to native crashes on some Windows setups (0xC0000409).
-            # Keep the preview UX simple and stable: use system default player only.
-            preview_group = QtWidgets.QGroupBox("试听播放器")
-            preview_v = QtWidgets.QVBoxLayout(preview_group)
-            preview_hint = QtWidgets.QLabel(
-                "使用系统默认播放器播放试听文件。"
-            )
-            preview_hint.setWordWrap(True)
-            preview_hint.setStyleSheet("color: gray;")
-            preview_v.addWidget(preview_hint)
-
-            preview_actions = QtWidgets.QHBoxLayout()
-            self.preview_play_system_btn = QtWidgets.QPushButton("播放（系统默认）")
-            self.preview_reveal_btn = QtWidgets.QPushButton("定位文件")
-            self.preview_play_system_btn.setEnabled(False)
-            self.preview_reveal_btn.setEnabled(False)
-            preview_actions.addWidget(self.preview_play_system_btn)
-            preview_actions.addWidget(self.preview_reveal_btn)
-            preview_actions.addStretch(1)
-            preview_v.addLayout(preview_actions)
-            self._preview_web_view = None
-            self._preview_web_available = False
-
-            right.addWidget(preview_group)
-
             self.log = QtWidgets.QPlainTextEdit()
             self.log.setReadOnly(True)
-            right.addWidget(self.log, 1)
+            # Keep log compact; extra vertical space goes below.
+            self.log.setMaximumHeight(260)
+            right.addWidget(self.log, 0)
+            right.addStretch(1)
 
             self._thread = None
             self._worker = None
@@ -655,13 +687,12 @@ def _build_ui(QtWidgets, QtCore):
             self.build_btn.clicked.connect(lambda: self._start("build"))
             self.stop_btn.clicked.connect(self._stop)
             self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
-            self.voice_refresh_btn.clicked.connect(self._refresh_voice_list)
             self.voice_preview_btn.clicked.connect(self._preview_voice)
-            self.preview_play_system_btn.clicked.connect(self._play_last_preview_system)
-            self.preview_reveal_btn.clicked.connect(self._reveal_last_preview)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
+            self.subtitle_y_ratio_enable.toggled.connect(self.subtitle_y_ratio_spin.setEnabled)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
+            self.script_load_btn.clicked.connect(self._load_script_file)
 
             self._restore_gui_state_from_config()
             # Auto-load voices on startup. Default locale: zh-CN; default speaker: Yunyang.
@@ -696,6 +727,12 @@ def _build_ui(QtWidgets, QtCore):
             self.pptx_edit.setText(_get_str("pptx_path", self.pptx_edit.text()))
             self.out_edit.setText(_get_str("out_dir", self.out_edit.text()))
             self.pages_edit.setText(_get_str("pages", self.pages_edit.text()) or "all")
+            ratio = _get_str("ratio", "16:9").strip() or "16:9"
+            idx_ratio = self.ratio_combo.findData(ratio)
+            if idx_ratio >= 0:
+                self.ratio_combo.setCurrentIndex(idx_ratio)
+
+            self.script_edit.setPlainText(_get_str("narration_script", ""))
 
             voice = _get_str("voice_id", "").strip()
             if voice:
@@ -752,6 +789,17 @@ def _build_ui(QtWidgets, QtCore):
                 self.subtitle_size_spin.setValue(raw if raw > 0 else 48)
             except Exception:
                 pass
+            try:
+                enabled = _get_bool("subtitle_y_ratio_enabled", False)
+                self.subtitle_y_ratio_enable.setChecked(enabled)
+            except Exception:
+                pass
+            try:
+                rawy = st.get("subtitle_y_ratio", None)
+                if rawy is not None and str(rawy).strip() != "":
+                    self.subtitle_y_ratio_spin.setValue(float(rawy))
+            except Exception:
+                pass
 
             self.bgm_path_edit.setText(_get_str("bgm_path", "").strip())
             try:
@@ -770,13 +818,6 @@ def _build_ui(QtWidgets, QtCore):
                 pass
             try:
                 self.bgm_fade_out_spin.setValue(float(st.get("bgm_fade_out_s", self.bgm_fade_out_spin.value())))
-            except Exception:
-                pass
-
-            try:
-                active_tab = int(st.get("active_tab", 0) or 0)
-                if 0 <= active_tab < self.tabs.count():
-                    self.tabs.setCurrentIndex(active_tab)
             except Exception:
                 pass
 
@@ -799,6 +840,8 @@ def _build_ui(QtWidgets, QtCore):
                     "pptx_path": self.pptx_edit.text().strip(),
                     "out_dir": self.out_edit.text().strip(),
                     "pages": self.pages_edit.text().strip() or "all",
+                    "ratio": str(self.ratio_combo.currentData() or "16:9"),
+                    "narration_script": self.script_edit.toPlainText(),
                     "voice_id": self._current_voice_id(),
                     "tts_rate": float(self.tts_rate_spin.value()),
                     "subtitle_color": self.subtitle_color_value.text().strip(),
@@ -810,12 +853,13 @@ def _build_ui(QtWidgets, QtCore):
                     "subtitle_shadow": int(self.subtitle_shadow_spin.value()),
                     "subtitle_font": self.subtitle_font_edit.currentText().strip(),
                     "subtitle_size": int(self.subtitle_size_spin.value()),
+                    "subtitle_y_ratio_enabled": bool(self.subtitle_y_ratio_enable.isChecked()),
+                    "subtitle_y_ratio": float(self.subtitle_y_ratio_spin.value()),
                     "bgm_path": self.bgm_path_edit.text().strip(),
                     "bgm_volume": float(self.bgm_volume_spin.value()),
                     "narration_volume": float(self.narration_volume_spin.value()),
                     "bgm_fade_in_s": float(self.bgm_fade_in_spin.value()),
                     "bgm_fade_out_s": float(self.bgm_fade_out_spin.value()),
-                    "active_tab": int(self.tabs.currentIndex()),
                     "window_w": int(self.size().width()),
                     "window_h": int(self.size().height()),
                 }
@@ -970,6 +1014,10 @@ def _build_ui(QtWidgets, QtCore):
                 self._append_log("当前有任务在运行，请稍后再试听。")
                 return
 
+            if not self._all_voice_items:
+                # No refresh button in UI; auto-load on demand.
+                self._refresh_voice_list()
+
             if self._preview_temp_path and self._preview_temp_path.exists():
                 try:
                     self._preview_temp_path.unlink()
@@ -1107,9 +1155,8 @@ def _build_ui(QtWidgets, QtCore):
                     size = -1
                 self._append_log(f"试听音频已生成：{p}  ({size} bytes)")
                 self._last_preview_path = p
-                self.preview_play_system_btn.setEnabled(True)
-                self.preview_reveal_btn.setEnabled(True)
-                self._append_log("提示：可用右侧按钮用系统默认播放器播放 / 定位文件。")
+                self._append_log("正在调用系统默认播放器打开试听音频…")
+                self._open_preview_file(p)
 
             timer.timeout.connect(_finish_preview)
             timer.start()
@@ -1232,7 +1279,7 @@ def _build_ui(QtWidgets, QtCore):
         def _pick_pptx(self) -> None:
             QtWidgets = self._QtWidgets
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self, "选择 PPTX", str(Path.cwd()), "PowerPoint (*.pptx)"
+                self, "选择文件", str(Path.cwd()), "PowerPoint / PDF (*.pptx *.pdf)"
             )
             if path:
                 self.pptx_edit.setText(path)
@@ -1245,10 +1292,31 @@ def _build_ui(QtWidgets, QtCore):
             if path:
                 self.out_edit.setText(path)
 
+        def _load_script_file(self) -> None:
+            QtWidgets = self._QtWidgets
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "加载旁白脚本",
+                self.out_edit.text().strip() or str(Path.cwd()),
+                "Text / JSON (*.txt *.md *.json);;All files (*)",
+            )
+            if not path:
+                return
+            try:
+                text = Path(path).read_text(encoding="utf-8")
+            except OSError as exc:
+                QtWidgets.QMessageBox.warning(self, "读取失败", str(exc))
+                return
+            except UnicodeDecodeError:
+                QtWidgets.QMessageBox.warning(self, "读取失败", "文件不是有效的 UTF-8 文本，请另存为 UTF-8 后再试。")
+                return
+            self.script_edit.setPlainText(text)
+
         def _validate(self) -> JobConfig:
             pptx = Path(self.pptx_edit.text().strip().strip('"'))
             out_dir = Path(self.out_edit.text().strip().strip('"'))
             pages = self.pages_edit.text().strip() or "all"
+            ratio = str(self.ratio_combo.currentData() or "16:9").strip() or "16:9"
             tts_provider = "edge"
             voice_id = self._current_voice_id()
             tts_rate = float(self.tts_rate_spin.value())
@@ -1261,14 +1329,19 @@ def _build_ui(QtWidgets, QtCore):
             subtitle_shadow = int(self.subtitle_shadow_spin.value())
             subtitle_font = self.subtitle_font_edit.currentText().strip() or None
             subtitle_size = int(self.subtitle_size_spin.value())
+            subtitle_y_ratio = None
+            if bool(self.subtitle_y_ratio_enable.isChecked()):
+                subtitle_y_ratio = float(self.subtitle_y_ratio_spin.value())
             bgm_path = self.bgm_path_edit.text().strip() or None
             bgm_volume = float(self.bgm_volume_spin.value())
             narration_volume = float(self.narration_volume_spin.value())
             bgm_fade_in_s = float(self.bgm_fade_in_spin.value())
             bgm_fade_out_s = float(self.bgm_fade_out_spin.value())
+            script_text = self.script_edit.toPlainText()
 
             if not pptx.exists() or pptx.suffix.lower() != ".pptx":
-                raise ValueError("请选择有效的 .pptx 文件。")
+                if pptx.suffix.lower() != ".pdf":
+                    raise ValueError("请选择有效的 .pptx 或 .pdf 文件。")
             if not out_dir:
                 raise ValueError("请选择输出目录。")
 
@@ -1277,6 +1350,7 @@ def _build_ui(QtWidgets, QtCore):
                 pptx_path=pptx,
                 out_dir=out_dir,
                 pages=pages,
+                ratio=ratio,
                 tts_provider=tts_provider,
                 voice_id=voice_id,
                 tts_rate=tts_rate,
@@ -1290,11 +1364,13 @@ def _build_ui(QtWidgets, QtCore):
                 subtitle_shadow=subtitle_shadow,
                 subtitle_font=subtitle_font,
                 subtitle_size=subtitle_size,
+                subtitle_y_ratio=subtitle_y_ratio,
                 bgm_path=bgm_path,
                 bgm_volume=bgm_volume,
                 narration_volume=narration_volume,
                 bgm_fade_in_s=bgm_fade_in_s,
                 bgm_fade_out_s=bgm_fade_out_s,
+                script_text=script_text,
             )
 
         def _set_running(self, running: bool) -> None:
@@ -1303,9 +1379,10 @@ def _build_ui(QtWidgets, QtCore):
             self.stop_btn.setEnabled(running)
             self.locale_combo.setEnabled(not running)
             self.voice_combo.setEnabled(not running)
-            self.voice_refresh_btn.setEnabled(not running)
             self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
+            self.script_edit.setReadOnly(running)
+            self.script_load_btn.setEnabled(not running)
             self.progress.setEnabled(True)
             if not running:
                 # Keep the last progress visible; mark idle explicitly.
@@ -1364,6 +1441,9 @@ def _build_ui(QtWidgets, QtCore):
                     tts_provider=config.tts_provider,
                     voice_id=config.voice_id,
                     tts_rate=config.tts_rate,
+                    ratio=config.ratio,
+                    script_text=config.script_text,
+                    script_temp_path=None,
                     minimax_base_url=config.minimax_base_url,
                     subtitle_color=config.subtitle_color,
                     subtitle_fade_in_ms=config.subtitle_fade_in_ms,
@@ -1374,6 +1454,7 @@ def _build_ui(QtWidgets, QtCore):
                     subtitle_shadow=config.subtitle_shadow,
                     subtitle_font=config.subtitle_font,
                     subtitle_size=config.subtitle_size,
+                    subtitle_y_ratio=config.subtitle_y_ratio,
                     bgm_path=config.bgm_path,
                     bgm_volume=config.bgm_volume,
                     narration_volume=config.narration_volume,
@@ -1394,33 +1475,105 @@ def _build_ui(QtWidgets, QtCore):
             # Run pipeline via QProcess (no Python threads) for stability on Windows.
             proc = QtCore.QProcess(self)
             proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
-            argv = _build_cli_argv_for_config(config)
+            prev_tmp = getattr(self, "_script_override_temp_path", None)
+            if prev_tmp:
+                try:
+                    Path(prev_tmp).unlink(missing_ok=True)
+                except OSError:
+                    pass
+                self._script_override_temp_path = None
+
+            config_for_proc = config
+            if (mode or "").strip().lower() == "build" and (config.script_text or "").strip():
+                tf = tempfile.NamedTemporaryFile(
+                    mode="w",
+                    encoding="utf-8",
+                    prefix="note2video_gui_script_",
+                    suffix=".txt",
+                    delete=False,
+                )
+                try:
+                    tf.write(config.script_text)
+                    tf.flush()
+                finally:
+                    tf.close()
+                config_for_proc = replace(config, script_temp_path=tf.name)
+                self._script_override_temp_path = tf.name
+
+            argv = _build_cli_argv_for_config(config_for_proc)
             program = argv[0]
             args = argv[1:]
             self._append_log("开始运行（QProcess）…")
             self._append_log("command: " + " ".join(argv))
             self._pipeline_proc = proc
 
-            def _on_ready() -> None:
+            def _read_output() -> None:
                 try:
-                    data = proc.readAllStandardOutput().data()
-                    if not data:
+                    raw = bytes(proc.readAllStandardOutput())
+                    if not raw:
                         return
-                    text = bytes(data).decode("utf-8", errors="replace")
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        # Some environments still emit CP936/GBK. Best-effort fallback.
+                        text = raw.decode("gbk", errors="replace")
                     for line in text.splitlines():
                         self._handle_pipeline_log(line)
                 except Exception:
                     self._append_log(traceback.format_exc())
 
+            def _on_started() -> None:
+                try:
+                    pid = int(proc.processId())
+                except Exception:
+                    pid = -1
+                self._append_log(f"子进程已启动：pid={pid}")
+
+            def _on_error(_err) -> None:
+                # If the process fails to start, it can look like it "completed instantly".
+                try:
+                    msg = proc.errorString()
+                except Exception:
+                    msg = ""
+                self._append_log(f"子进程错误：{msg}".rstrip())
+
             def _on_finished(exit_code: int, _status) -> None:
+                _read_output()
+                # If the child printed a JSON result, extract video path for convenience.
+                payload = None
+                try:
+                    import json as _json
+
+                    txt = self.log.toPlainText()
+                    start = txt.find("{")
+                    end = txt.rfind("}")
+                    if 0 <= start < end:
+                        payload = _json.loads(txt[start : end + 1])
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    artifacts = payload.get("artifacts") or {}
+                    if isinstance(artifacts, dict):
+                        video = artifacts.get("video")
+                        if isinstance(video, str) and video.strip():
+                            self._append_log(f"输出视频：{video}")
                 self._append_log(f"退出码：{int(exit_code)}")
+                tmp = getattr(self, "_script_override_temp_path", None)
+                if tmp:
+                    try:
+                        Path(tmp).unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    self._script_override_temp_path = None
                 self._pipeline_busy = False
                 self._set_running(False)
                 self._pipeline_proc = None
                 if int(exit_code) != 0:
                     QtWidgets.QMessageBox.warning(self, "运行失败", "任务未成功完成，请查看下方日志。")
 
-            proc.readyReadStandardOutput.connect(_on_ready)
+            proc.started.connect(_on_started)
+            proc.errorOccurred.connect(_on_error)
+            proc.readyRead.connect(_read_output)
             proc.finished.connect(_on_finished)
             proc.start(program, args)
 
