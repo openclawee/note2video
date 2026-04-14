@@ -398,9 +398,12 @@ def _build_ui(QtWidgets, QtCore):
 
             self.pptx_edit = QtWidgets.QLineEdit()
             self.pptx_btn = QtWidgets.QPushButton("选择…")
+            self.compose_btn = QtWidgets.QPushButton("模板生成…")
+            self.compose_btn.setToolTip("从单页模板 template.pptx + params.json 生成 deck.pptx，并自动填入 PPTX。")
             pptx_row = QtWidgets.QHBoxLayout()
             pptx_row.addWidget(self.pptx_edit, 1)
             pptx_row.addWidget(self.pptx_btn)
+            pptx_row.addWidget(self.compose_btn)
             io_grid.addWidget(QtWidgets.QLabel("PPTX"), 0, 0)
             io_grid.addLayout(pptx_row, 0, 1, 1, 3)
 
@@ -682,6 +685,7 @@ def _build_ui(QtWidgets, QtCore):
             self._worker = None
 
             self.pptx_btn.clicked.connect(self._pick_pptx)
+            self.compose_btn.clicked.connect(self._compose_from_template)
             self.out_btn.clicked.connect(self._pick_out_dir)
             self.extract_btn.clicked.connect(lambda: self._start("extract"))
             self.build_btn.clicked.connect(lambda: self._start("build"))
@@ -1283,6 +1287,137 @@ def _build_ui(QtWidgets, QtCore):
             )
             if path:
                 self.pptx_edit.setText(path)
+
+        def _compose_from_template(self) -> None:
+            QtCore = self._QtCore
+            QtWidgets = self._QtWidgets
+            if self._pipeline_busy or self._pipeline_proc is not None:
+                self._append_log("当前有任务在运行，请稍后再执行模板生成。")
+                return
+
+            template_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self, "选择模板 PPTX（单页）", str(Path.cwd()), "PowerPoint (*.pptx)"
+            )
+            if not template_path:
+                return
+            params_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择 params.json",
+                str(Path(template_path).parent),
+                "JSON (*.json);;All files (*)",
+            )
+            if not params_path:
+                return
+
+            # Default output: <out_dir>/deck.pptx
+            out_dir = Path(self.out_edit.text().strip().strip('"') or "dist")
+            default_out = str((out_dir / "deck.pptx").resolve())
+            out_pptx, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "保存生成的 PPTX",
+                default_out,
+                "PowerPoint (*.pptx)",
+            )
+            if not out_pptx:
+                return
+            if not out_pptx.lower().endswith(".pptx"):
+                out_pptx = out_pptx + ".pptx"
+
+            assets_base = str(Path(params_path).parent.resolve())
+
+            argv = [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-m",
+                "note2video.cli.main",
+                "compose",
+                str(Path(template_path).resolve()),
+                str(Path(params_path).resolve()),
+                "--out",
+                str(Path(out_pptx).resolve()),
+                "--assets-base-dir",
+                assets_base,
+                "--json",
+            ]
+
+            self.log.clear()
+            self._append_log("开始运行（QProcess）…")
+            self._append_log("阶段：compose")
+            self._append_log("command: " + " ".join(argv))
+            self._pipeline_busy = True
+            self._set_running(True)
+            self.progress.setRange(0, 1)
+            self.progress.setValue(0)
+            self.progress.setFormat("进度：compose (1/1)")
+
+            proc = QtCore.QProcess(self)
+            proc.setProcessChannelMode(QtCore.QProcess.ProcessChannelMode.MergedChannels)
+            self._pipeline_proc = proc
+
+            buf: list[str] = []
+
+            def _read_output() -> None:
+                try:
+                    raw = bytes(proc.readAllStandardOutput())
+                    if not raw:
+                        return
+                    try:
+                        text = raw.decode("utf-8")
+                    except UnicodeDecodeError:
+                        text = raw.decode("gbk", errors="replace")
+                    buf.append(text)
+                    for line in text.splitlines():
+                        self._append_log(line)
+                except Exception:
+                    self._append_log(traceback.format_exc())
+
+            def _on_error(_err) -> None:
+                try:
+                    msg = proc.errorString()
+                except Exception:
+                    msg = ""
+                self._append_log(f"子进程错误：{msg}".rstrip())
+
+            def _on_finished(exit_code: int, _status) -> None:
+                _read_output()
+                self._append_log(f"退出码：{int(exit_code)}")
+                self._pipeline_busy = False
+                self._set_running(False)
+                self._pipeline_proc = None
+                self.progress.setRange(0, 4)
+                if int(exit_code) != 0:
+                    QtWidgets.QMessageBox.warning(self, "模板生成失败", "compose 未成功完成，请查看日志。")
+                    return
+
+                # Best-effort: parse JSON payload from stdout to locate output_pptx and set it.
+                try:
+                    import json as _json
+
+                    joined = "".join(buf)
+                    start = joined.find("{")
+                    end = joined.rfind("}")
+                    payload = _json.loads(joined[start : end + 1]) if 0 <= start < end else None
+                except Exception:
+                    payload = None
+                if isinstance(payload, dict):
+                    outp = payload.get("output_pptx")
+                    if isinstance(outp, str) and outp.strip():
+                        self.pptx_edit.setText(outp.strip())
+                        self._append_log(f"已填入 PPTX：{outp.strip()}")
+                        QtWidgets.QMessageBox.information(self, "模板生成完成", "已生成 PPTX，并自动填入输入框。")
+                        return
+                # Fallback: still set to chosen output path.
+                self.pptx_edit.setText(str(Path(out_pptx).resolve()))
+                QtWidgets.QMessageBox.information(self, "模板生成完成", "已生成 PPTX，并自动填入输入框。")
+
+            proc.errorOccurred.connect(_on_error)
+            proc.readyRead.connect(_read_output)
+            proc.finished.connect(_on_finished)
+
+            program = argv[0]
+            args = argv[1:]
+            proc.start(program, args)
 
         def _pick_out_dir(self) -> None:
             QtWidgets = self._QtWidgets

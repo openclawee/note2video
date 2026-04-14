@@ -27,6 +27,7 @@ from note2video.tts.voice import (
     generate_voice_assets,
     list_available_voices,
 )
+from note2video.compose.pptx import ComposeError, compose_pptx_from_template
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -137,6 +138,23 @@ def build_parser() -> argparse.ArgumentParser:
     extract_cmd.add_argument("input", help="Path to the input .pptx or .pdf file.")
     extract_cmd.add_argument("--pages", default="all", help="Page selection, e.g. 1-3,5.")
     extract_cmd.set_defaults(handler=handle_extract)
+
+    compose_cmd = subparsers.add_parser("compose", help="Generate a .pptx from a one-slide template + params.json.")
+    compose_cmd.add_argument("template", help="Path to the template .pptx (single slide).")
+    compose_cmd.add_argument("params", help="Path to params.json containing a 'pages' array.")
+    compose_cmd.add_argument("--out", default="./dist/deck.pptx", help="Output .pptx path.")
+    compose_cmd.add_argument(
+        "--assets-base-dir",
+        default="",
+        help="Optional base directory for resolving relative image paths in params.json.",
+    )
+    compose_cmd.add_argument(
+        "--json",
+        action="store_true",
+        dest="json_output",
+        help="Print a machine-readable JSON summary.",
+    )
+    compose_cmd.set_defaults(handler=handle_compose)
 
     voice_cmd = subparsers.add_parser("voice", help="Generate voice-over audio.")
     _add_common_arguments(voice_cmd)
@@ -323,6 +341,30 @@ def handle_extract(args: argparse.Namespace) -> int:
     return _emit_result(payload, json_output=args.json_output)
 
 
+def handle_compose(args: argparse.Namespace) -> int:
+    stats = compose_pptx_from_template(
+        template_pptx=args.template,
+        params_json=args.params,
+        output_pptx=args.out,
+        assets_base_dir=(args.assets_base_dir.strip() or None),
+    )
+    payload = {
+        "command": "compose",
+        "status": "ok",
+        "template": args.template,
+        "params": args.params,
+        "output_pptx": args.out,
+        "slide_count": int(stats.slide_count),
+        "applied_text_fields": int(stats.applied_text_fields),
+        "ignored_text_fields": int(stats.ignored_text_fields),
+        "applied_images": int(stats.applied_images),
+        "ignored_images": int(stats.ignored_images),
+        "applied_notes": int(stats.applied_notes),
+        "message": "PPTX composed.",
+    }
+    return _emit_result(payload, json_output=args.json_output)
+
+
 def handle_voice(args: argparse.Namespace) -> int:
     result = run_voice_pipeline(
         VoiceRequest(
@@ -475,6 +517,9 @@ def main(argv: list[str] | None = None) -> int:
     except PowerPointUnavailableError as exc:
         print(f"[error] {exc}")
         return 4
+    except ComposeError as exc:
+        print(f"[error] {exc}")
+        return 8
     except VoiceGenerationError as exc:
         print(f"[error] {exc}")
         return 5

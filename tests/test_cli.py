@@ -18,6 +18,7 @@ from note2video.tts.voice import (
     _convert_audio_to_wav,
     _create_provider,
 )
+from note2video.compose.pptx import compose_pptx_from_template
 
 
 def test_voice_command_generates_audio_files(tmp_path, monkeypatch) -> None:
@@ -652,6 +653,171 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
     export_path, export_format = exported_paths[0]
     assert Path(export_path).is_absolute()
     assert export_format == "PNG"
+
+
+def test_compose_pptx_loose_field_application(tmp_path, monkeypatch) -> None:
+    # Prepare template + params.
+    template = tmp_path / "template.pptx"
+    template.write_bytes(b"placeholder")
+    out_pptx = tmp_path / "deck.pptx"
+    params = tmp_path / "params.json"
+    params.write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "fields": {"title": "Hello", "missing": "ignored"},
+                        "images": {"hero_image": str(tmp_path / "hero.png")},
+                        "notes": "Speaker notes 1",
+                    },
+                    {
+                        "fields": {"title": "World"},
+                        "notes": "Speaker notes 2",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hero.png").write_bytes(b"png")
+
+    # Fake COM objects.
+    class FakeTextRange:
+        def __init__(self):
+            self.Text = ""
+
+    class FakeTextFrame:
+        def __init__(self):
+            self.TextRange = FakeTextRange()
+
+    class FakePlaceholderFormat:
+        def __init__(self, placeholder_type: int):
+            self.Type = placeholder_type
+
+    class FakeShape:
+        def __init__(self, name: str, *, has_text: bool = True, is_notes_body: bool = False):
+            self.Name = name
+            self.HasTextFrame = -1 if has_text else 0
+            self.TextFrame = FakeTextFrame() if has_text else None
+            self.Left = 10
+            self.Top = 20
+            self.Width = 300
+            self.Height = 200
+            self._deleted = False
+            # Notes placeholder shape type is 14 in extract tests.
+            self.Type = 14 if is_notes_body else 1
+            self.PlaceholderFormat = FakePlaceholderFormat(2) if is_notes_body else FakePlaceholderFormat(0)
+
+        def Delete(self):
+            self._deleted = True
+
+    class FakeShapes:
+        def __init__(self, shapes: list[FakeShape]):
+            self._shapes = shapes
+
+        @property
+        def Count(self):
+            return len([s for s in self._shapes if not getattr(s, "_deleted", False)])
+
+        def __call__(self, idx: int):
+            alive = [s for s in self._shapes if not getattr(s, "_deleted", False)]
+            return alive[idx - 1]
+
+        def AddPicture(self, FileName, LinkToFile, SaveWithDocument, Left, Top, Width, Height):
+            s = FakeShape("NEWPIC", has_text=False)
+            s.Left, s.Top, s.Width, s.Height = Left, Top, Width, Height
+            self._shapes.append(s)
+            return s
+
+    class FakeNotesPage:
+        def __init__(self):
+            self.Shapes = FakeShapes([FakeShape("notes_body", is_notes_body=True)])
+
+    class FakeSlide:
+        def __init__(self, slides):
+            self._slides = slides
+            self.Shapes = FakeShapes([FakeShape("title"), FakeShape("hero_image", has_text=False)])
+            self.NotesPage = FakeNotesPage()
+
+        def Duplicate(self):
+            # Simulate PowerPoint: duplicating a slide increases the Slides collection.
+            new_slide = FakeSlide(self._slides)
+            self._slides.append(new_slide)
+            return FakeSlideRange(new_slide)
+
+        def MoveTo(self, _idx):
+            return None
+
+    class FakeSlideRange:
+        def __init__(self, slide):
+            self._slide = slide
+
+        def Item(self, _idx):
+            return self._slide
+
+    class FakeSlides:
+        def __init__(self):
+            self._slides = []
+            self._slides.append(FakeSlide(self))
+
+        @property
+        def Count(self):
+            return len(self._slides)
+
+        def __call__(self, idx: int):
+            return self._slides[idx - 1]
+
+        def __iter__(self):
+            return iter(self._slides)
+
+        def append(self, slide):
+            self._slides.append(slide)
+
+    class FakePresentation:
+        def __init__(self, writable: bool):
+            self._writable = writable
+            self.Slides = FakeSlides()
+
+        def SaveCopyAs(self, path):
+            Path(path).write_bytes(b"copy")
+
+        def Save(self):
+            return None
+
+        def Close(self):
+            return None
+
+    class FakePresentations:
+        def Open(self, _path, ReadOnly=1, Untitled=0, WithWindow=0):
+            return FakePresentation(writable=(ReadOnly == 0))
+
+    class FakeApp:
+        def __init__(self):
+            self.Visible = 0
+            self.DisplayAlerts = 0
+            self.Presentations = FakePresentations()
+
+        def Quit(self):
+            return None
+
+    fake_pythoncom = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None)
+    fake_client = SimpleNamespace(DispatchEx=lambda _name: FakeApp())
+    monkeypatch.setitem(__import__("sys").modules, "pythoncom", fake_pythoncom)
+    monkeypatch.setitem(__import__("sys").modules, "win32com", SimpleNamespace(client=fake_client))
+    monkeypatch.setitem(__import__("sys").modules, "win32com.client", fake_client)
+
+    stats = compose_pptx_from_template(
+        template_pptx=str(template),
+        params_json=str(params),
+        output_pptx=str(out_pptx),
+        assets_base_dir=str(tmp_path),
+    )
+    assert stats.slide_count == 2
+    # 'title' applied on both pages; 'missing' ignored.
+    assert stats.applied_text_fields == 2
+    assert stats.ignored_text_fields == 1
+    assert stats.applied_notes == 2
 
 
 def _write_minimal_openxml_pptx(output_path: Path) -> None:
