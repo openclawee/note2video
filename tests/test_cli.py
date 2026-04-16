@@ -3,6 +3,7 @@ import wave
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from note2video.cli.main import main
@@ -19,6 +20,23 @@ from note2video.tts.voice import (
     _create_provider,
 )
 from note2video.compose.pptx import compose_pptx_from_template
+
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+XML_NS = {
+    "p": PML_NS,
+    "a": DML_NS,
+    "r": DOC_REL_NS,
+    "rel": PKG_REL_NS,
+}
+MINIMAL_PNG = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde"
+    b"\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0\x00\x00\x03\x01\x01\x00\xc9\xfe\x92\xef"
+    b"\x00\x00\x00\x00IEND\xaeB`\x82"
+)
 
 
 def test_voice_command_generates_audio_files(tmp_path, monkeypatch) -> None:
@@ -633,6 +651,10 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
 
     fake_pythoncom = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None)
     fake_client = SimpleNamespace(DispatchEx=lambda _name: FakeApp())
+    fake_win32gui = SimpleNamespace(
+        FindWindow=lambda *_args, **_kwargs: 0,
+        SetWindowPos=lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setitem(__import__("sys").modules, "pythoncom", fake_pythoncom)
     monkeypatch.setitem(
         __import__("sys").modules,
@@ -640,6 +662,7 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
         SimpleNamespace(client=fake_client),
     )
     monkeypatch.setitem(__import__("sys").modules, "win32com.client", fake_client)
+    monkeypatch.setitem(__import__("sys").modules, "win32gui", fake_win32gui)
 
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
@@ -655,7 +678,10 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
     assert export_format == "PNG"
 
 
-def test_compose_pptx_loose_field_application(tmp_path, monkeypatch) -> None:
+def test_compose_pptx_loose_field_application_windows_backend(tmp_path, monkeypatch) -> None:
+    import note2video.compose.pptx as compose_module
+
+    monkeypatch.setattr(compose_module.sys, "platform", "win32")
     # Prepare template + params.
     template = tmp_path / "template.pptx"
     template.write_bytes(b"placeholder")
@@ -817,7 +843,65 @@ def test_compose_pptx_loose_field_application(tmp_path, monkeypatch) -> None:
     # 'title' applied on both pages; 'missing' ignored.
     assert stats.applied_text_fields == 2
     assert stats.ignored_text_fields == 1
+    assert stats.applied_images == 1
+    assert stats.ignored_images == 0
     assert stats.applied_notes == 2
+
+
+def test_compose_pptx_openxml_backend_on_linux(tmp_path, monkeypatch) -> None:
+    import note2video.compose.pptx as compose_module
+
+    monkeypatch.setattr(compose_module.sys, "platform", "linux")
+
+    template = tmp_path / "template.pptx"
+    _write_compose_template_pptx(template)
+    out_pptx = tmp_path / "deck.pptx"
+    params = tmp_path / "params.json"
+    params.write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "fields": {"title": "Hello", "missing": "ignored"},
+                        "images": {"hero_image": "hero.png"},
+                        "notes": "Speaker notes 1",
+                    },
+                    {
+                        "fields": {"title": "World"},
+                        "images": {"missing_image": "missing.png"},
+                        "notes": "Speaker notes 2",
+                    },
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (tmp_path / "hero.png").write_bytes(MINIMAL_PNG)
+
+    stats = compose_pptx_from_template(
+        template_pptx=str(template),
+        params_json=str(params),
+        output_pptx=str(out_pptx),
+        assets_base_dir=str(tmp_path),
+    )
+
+    assert stats.slide_count == 2
+    assert stats.applied_text_fields == 2
+    assert stats.ignored_text_fields == 1
+    assert stats.applied_images == 1
+    assert stats.ignored_images == 1
+    assert stats.applied_notes == 2
+    assert _read_pptx_slide_count(out_pptx) == 2
+    assert _read_pptx_shape_text(out_pptx, slide_index=1, shape_name="title") == "Hello"
+    assert _read_pptx_shape_text(out_pptx, slide_index=2, shape_name="title") == "World"
+    assert _read_pptx_notes_text(out_pptx, slide_index=1) == "Speaker notes 1"
+    assert _read_pptx_notes_text(out_pptx, slide_index=2) == "Speaker notes 2"
+    picture_target = _read_pptx_picture_target(out_pptx, slide_index=1, shape_name="hero_image")
+    assert picture_target is not None
+    assert picture_target.startswith("../media/compose-001-hero_image")
+    with ZipFile(out_pptx, "r") as archive:
+        assert any(name.startswith("ppt/media/compose-001-hero_image") for name in archive.namelist())
 
 
 def _write_minimal_openxml_pptx(output_path: Path) -> None:
@@ -932,3 +1016,183 @@ def _write_minimal_openxml_pptx(output_path: Path) -> None:
         archive.writestr("ppt/slides/slide1.xml", slide1)
         archive.writestr("ppt/slides/_rels/slide1.xml.rels", slide1_rels)
         archive.writestr("ppt/notesSlides/notesSlide1.xml", notes_slide1)
+
+
+def _write_compose_template_pptx(output_path: Path) -> None:
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+</Types>"""
+
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>
+</Relationships>"""
+
+    presentation = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:sldIdLst>
+  <p:sldId id="256" r:id="rId1"/>
+ </p:sldIdLst>
+ <p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>
+ <p:notesSz cx="6858000" cy="9144000"/>
+</p:presentation>"""
+
+    presentation_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+</Relationships>"""
+
+    slide1 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:cSld>
+  <p:spTree>
+   <p:nvGrpSpPr>
+    <p:cNvPr id="1" name=""/>
+    <p:cNvGrpSpPr/>
+    <p:nvPr/>
+   </p:nvGrpSpPr>
+   <p:grpSpPr>
+    <a:xfrm>
+     <a:off x="0" y="0"/>
+     <a:ext cx="0" cy="0"/>
+     <a:chOff x="0" y="0"/>
+     <a:chExt cx="0" cy="0"/>
+    </a:xfrm>
+   </p:grpSpPr>
+   <p:sp>
+    <p:nvSpPr>
+     <p:cNvPr id="2" name="title"/>
+     <p:cNvSpPr/>
+     <p:nvPr><p:ph type="title"/></p:nvPr>
+    </p:nvSpPr>
+    <p:spPr/>
+    <p:txBody>
+     <a:bodyPr/>
+     <a:lstStyle/>
+     <a:p><a:r><a:t>Template Title</a:t></a:r></a:p>
+    </p:txBody>
+   </p:sp>
+   <p:sp>
+    <p:nvSpPr>
+     <p:cNvPr id="3" name="hero_image"/>
+     <p:cNvSpPr/>
+     <p:nvPr/>
+    </p:nvSpPr>
+    <p:spPr>
+     <a:xfrm>
+      <a:off x="914400" y="1828800"/>
+      <a:ext cx="3657600" cy="2057400"/>
+     </a:xfrm>
+     <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+    </p:spPr>
+   </p:sp>
+  </p:spTree>
+ </p:cSld>
+ <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>"""
+
+    slide1_rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>
+</Relationships>"""
+
+    notes_slide1 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+ xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+ xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+ <p:cSld>
+  <p:spTree>
+   <p:nvGrpSpPr>
+    <p:cNvPr id="1" name=""/>
+    <p:cNvGrpSpPr/>
+    <p:nvPr/>
+   </p:nvGrpSpPr>
+   <p:grpSpPr><a:xfrm/></p:grpSpPr>
+   <p:sp>
+    <p:nvSpPr>
+     <p:cNvPr id="2" name="Notes Placeholder 1"/>
+     <p:cNvSpPr/>
+     <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+    </p:nvSpPr>
+    <p:spPr/>
+    <p:txBody>
+     <a:bodyPr/>
+     <a:lstStyle/>
+     <a:p><a:r><a:t>Template notes</a:t></a:r></a:p>
+    </p:txBody>
+   </p:sp>
+  </p:spTree>
+ </p:cSld>
+ <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:notes>"""
+
+    with ZipFile(output_path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("ppt/presentation.xml", presentation)
+        archive.writestr("ppt/_rels/presentation.xml.rels", presentation_rels)
+        archive.writestr("ppt/slides/slide1.xml", slide1)
+        archive.writestr("ppt/slides/_rels/slide1.xml.rels", slide1_rels)
+        archive.writestr("ppt/notesSlides/notesSlide1.xml", notes_slide1)
+
+
+def _read_pptx_slide_count(pptx_path: Path) -> int:
+    with ZipFile(pptx_path, "r") as archive:
+        presentation_root = ET.fromstring(archive.read("ppt/presentation.xml"))
+    return len(presentation_root.findall("./p:sldIdLst/p:sldId", XML_NS))
+
+
+def _read_pptx_shape_text(pptx_path: Path, *, slide_index: int, shape_name: str) -> str:
+    slide_path = f"ppt/slides/slide{slide_index}.xml"
+    with ZipFile(pptx_path, "r") as archive:
+        slide_root = ET.fromstring(archive.read(slide_path))
+    for shape in slide_root.findall("./p:cSld/p:spTree/p:sp", XML_NS):
+        c_nvpr = shape.find("./p:nvSpPr/p:cNvPr", XML_NS)
+        if c_nvpr is None or c_nvpr.get("name") != shape_name:
+            continue
+        lines = []
+        for paragraph in shape.findall(".//a:p", XML_NS):
+            lines.append("".join(node.text or "" for node in paragraph.findall(".//a:t", XML_NS)))
+        return "\n".join(line for line in lines if line)
+    return ""
+
+
+def _read_pptx_notes_text(pptx_path: Path, *, slide_index: int) -> str:
+    notes_path = f"ppt/notesSlides/notesSlide{slide_index}.xml"
+    with ZipFile(pptx_path, "r") as archive:
+        notes_root = ET.fromstring(archive.read(notes_path))
+    lines = []
+    for paragraph in notes_root.findall(".//a:p", XML_NS):
+        lines.append("".join(node.text or "" for node in paragraph.findall(".//a:t", XML_NS)))
+    return "\n".join(line for line in lines if line)
+
+
+def _read_pptx_picture_target(pptx_path: Path, *, slide_index: int, shape_name: str) -> str | None:
+    slide_path = f"ppt/slides/slide{slide_index}.xml"
+    rels_path = f"ppt/slides/_rels/slide{slide_index}.xml.rels"
+    with ZipFile(pptx_path, "r") as archive:
+        slide_root = ET.fromstring(archive.read(slide_path))
+        rels_root = ET.fromstring(archive.read(rels_path))
+    embed = None
+    for picture in slide_root.findall("./p:cSld/p:spTree/p:pic", XML_NS):
+        c_nvpr = picture.find("./p:nvPicPr/p:cNvPr", XML_NS)
+        if c_nvpr is None or c_nvpr.get("name") != shape_name:
+            continue
+        blip = picture.find("./p:blipFill/a:blip", XML_NS)
+        embed = blip.get(f"{{{DOC_REL_NS}}}embed") if blip is not None else None
+        break
+    if embed is None:
+        return None
+    for relationship in rels_root.findall("./rel:Relationship", XML_NS):
+        if relationship.get("Id") == embed:
+            return relationship.get("Target")
+    return None

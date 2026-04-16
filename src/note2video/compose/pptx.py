@@ -1,11 +1,39 @@
 from __future__ import annotations
 
 import json
-import os
+import mimetypes
+import posixpath
+import re
+import shutil
 import sys
+import tempfile
+import zipfile
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
+
+PML_NS = "http://schemas.openxmlformats.org/presentationml/2006/main"
+DML_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+DOC_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
+XML_NS = {
+    "p": PML_NS,
+    "a": DML_NS,
+    "r": DOC_REL_NS,
+    "rel": PKG_REL_NS,
+    "ct": CONTENT_TYPES_NS,
+}
+IMAGE_REL_TYPE = f"{DOC_REL_NS}/image"
+NOTES_REL_TYPE = f"{DOC_REL_NS}/notesSlide"
+SLIDE_REL_TYPE = f"{DOC_REL_NS}/slide"
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+ET.register_namespace("a", DML_NS)
+ET.register_namespace("p", PML_NS)
+ET.register_namespace("r", DOC_REL_NS)
 
 
 class ComposeError(RuntimeError):
@@ -30,7 +58,7 @@ def compose_pptx_from_template(
     assets_base_dir: str | None = None,
 ) -> ComposeStats:
     """
-    Compose a PPTX by duplicating the single slide in `template_pptx` N times and applying per-page fields.
+    Compose a PPTX by duplicating the first template slide N times and applying per-page fields.
 
     Params JSON format (loose/forgiving):
     {
@@ -43,7 +71,8 @@ def compose_pptx_from_template(
     Behavior:
     - Missing shape names are ignored (loose mode).
     - Only string-like values are written (values are coerced via str()).
-    - This implementation uses PowerPoint COM on Windows for best fidelity.
+    - Windows prefers PowerPoint COM for best fidelity.
+    - Other platforms compose by editing the PPTX package directly via OpenXML.
     """
     template_path = Path(template_pptx)
     if not template_path.exists():
@@ -54,7 +83,6 @@ def compose_pptx_from_template(
     try:
         payload = json.loads(Path(params_json).read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        # Most common issue on Windows: unescaped backslashes in paths, e.g. "C:\Users\..."
         raise ValueError(
             "Invalid params.json (not valid JSON). "
             "If you used Windows paths, please escape backslashes (\\\\) or use forward slashes (/). "
@@ -69,15 +97,26 @@ def compose_pptx_from_template(
 
     base_dir = Path(assets_base_dir) if assets_base_dir else None
 
-    if sys.platform != "win32":
-        raise ComposeError("compose is currently implemented via PowerPoint COM and requires Windows.")
-
-    return _compose_pptx_powerpoint_com(
+    if sys.platform == "win32":
+        return _compose_pptx_powerpoint_com(
+            template_path=template_path,
+            pages=pages,
+            out_path=out_path,
+            assets_base_dir=base_dir,
+        )
+    return _compose_pptx_openxml(
         template_path=template_path,
         pages=pages,
         out_path=out_path,
         assets_base_dir=base_dir,
     )
+
+
+def _resolve_image_path(raw: str, assets_base_dir: Path | None) -> Path:
+    path = Path(str(raw).strip().strip('"'))
+    if not path.is_absolute() and assets_base_dir is not None:
+        path = (assets_base_dir / path).resolve()
+    return path
 
 
 def _compose_pptx_powerpoint_com(
@@ -98,18 +137,10 @@ def _compose_pptx_powerpoint_com(
     pres = None
     pres_out = None
 
-    # Office constants (avoid win32com.constants import to keep tests easy to mock).
     msoTrue = -1
     msoFalse = 0
-    # Placeholder shape type in tests uses 14; we keep it consistent with extract.py usage.
     msoPlaceholder = 14
     ppPlaceholderBody = 2
-
-    def _resolve_image_path(raw: str) -> str:
-        p = Path(str(raw).strip().strip('"'))
-        if not p.is_absolute() and assets_base_dir is not None:
-            p = (assets_base_dir / p).resolve()
-        return str(p)
 
     try:
         app = win32com.client.DispatchEx("PowerPoint.Application")
@@ -123,7 +154,6 @@ def _compose_pptx_powerpoint_com(
             WithWindow=0,
         )
 
-        # Create a writable copy and operate on it so the template remains untouched.
         if out_path.exists():
             try:
                 out_path.unlink()
@@ -143,16 +173,12 @@ def _compose_pptx_powerpoint_com(
         if int(getattr(pres_out, "Slides", []).Count) < 1:  # pragma: no cover - sanity
             raise ComposeError("Template presentation has no slides.")
 
-        # Ensure slide count == len(pages) by duplicating slide 1.
         target_n = len(pages)
         while int(pres_out.Slides.Count) < target_n:
-            # Duplicate the first slide and move it to the end.
             dup_range = pres_out.Slides(1).Duplicate()
-            # SlideRange.Item(1) for the actual slide in many Office versions.
             dup_slide = dup_range.Item(1) if hasattr(dup_range, "Item") else dup_range
             dup_slide.MoveTo(int(pres_out.Slides.Count))
 
-        # If template has more than 1 slide, trim extras from the end.
         while int(pres_out.Slides.Count) > target_n:
             pres_out.Slides(int(pres_out.Slides.Count)).Delete()
 
@@ -168,7 +194,6 @@ def _compose_pptx_powerpoint_com(
             images = page.get("images") if isinstance(page.get("images"), dict) else {}
             notes = page.get("notes")
 
-            # Text fields (loose mode).
             for key, value in dict(fields).items():
                 name = str(key)
                 desired = str(value if value is not None else "")
@@ -190,16 +215,14 @@ def _compose_pptx_powerpoint_com(
                 tr.Text = desired
                 applied_text += 1
 
-            # Images (loose mode).
             for key, raw_path in dict(images).items():
                 name = str(key)
                 shape = _find_shape_by_name(slide.Shapes, name)
                 if shape is None:
                     ignored_images += 1
                     continue
-                path = _resolve_image_path(str(raw_path))
-                if not Path(path).exists():
-                    # Missing file: ignore in loose mode.
+                path = _resolve_image_path(str(raw_path), assets_base_dir)
+                if not path.exists():
                     ignored_images += 1
                     continue
                 try:
@@ -211,14 +234,12 @@ def _compose_pptx_powerpoint_com(
                     ignored_images += 1
                     continue
 
-                # Replace by deleting the placeholder/image shape and inserting a picture at same rect.
-                # This is the most compatible approach across Office versions.
                 try:
                     shape.Delete()
                 except Exception:
                     pass
                 pic = slide.Shapes.AddPicture(
-                    FileName=str(Path(path).resolve()),
+                    FileName=str(path.resolve()),
                     LinkToFile=msoFalse,
                     SaveWithDocument=msoTrue,
                     Left=left,
@@ -232,7 +253,6 @@ def _compose_pptx_powerpoint_com(
                     pass
                 applied_images += 1
 
-            # Speaker notes (optional; loose mode).
             if notes is not None and str(notes).strip():
                 if _try_set_slide_notes(slide, str(notes), placeholder_shape_type=msoPlaceholder, body_type=ppPlaceholderBody):
                     applied_notes += 1
@@ -272,6 +292,196 @@ def _compose_pptx_powerpoint_com(
             pass
 
 
+def _compose_pptx_openxml(
+    *,
+    template_path: Path,
+    pages: list[Any],
+    out_path: Path,
+    assets_base_dir: Path | None,
+) -> ComposeStats:
+    work_dir = Path(tempfile.mkdtemp(prefix="note2video-compose-"))
+    try:
+        try:
+            with zipfile.ZipFile(template_path, "r") as archive:
+                archive.extractall(work_dir)
+        except zipfile.BadZipFile as exc:
+            raise ComposeError(f"Invalid .pptx package: {template_path}") from exc
+
+        content_types_path = work_dir / "[Content_Types].xml"
+        presentation_path = work_dir / "ppt" / "presentation.xml"
+        presentation_rels_path = work_dir / "ppt" / "_rels" / "presentation.xml.rels"
+        for required_path in (content_types_path, presentation_path, presentation_rels_path):
+            if not required_path.exists():
+                raise ComposeError(f"Invalid .pptx package: missing {required_path.relative_to(work_dir)}")
+
+        try:
+            content_types_root = ET.parse(content_types_path).getroot()
+            presentation_root = ET.parse(presentation_path).getroot()
+            presentation_rels_root = ET.parse(presentation_rels_path).getroot()
+        except ET.ParseError as exc:
+            raise ComposeError(f"Malformed .pptx XML: {exc}") from exc
+
+        base_slide_path = _resolve_primary_slide_path(presentation_root, presentation_rels_root)
+        if not base_slide_path:
+            raise ComposeError("Template presentation has no slides.")
+
+        base_slide_root = _read_xml_part(work_dir, base_slide_path)
+        base_slide_rels_root = _read_xml_part(work_dir, _to_rels_path(base_slide_path), required=False)
+        if base_slide_rels_root is None:
+            base_slide_rels_root = _new_relationships_root()
+        base_notes_path = _resolve_related_part_path(base_slide_path, base_slide_rels_root, NOTES_REL_TYPE)
+        base_notes_root = _read_xml_part(work_dir, base_notes_path, required=False) if base_notes_path else None
+
+        media_dir = work_dir / "ppt" / "media"
+        media_dir.mkdir(parents=True, exist_ok=True)
+
+        applied_text = ignored_text = 0
+        applied_images = ignored_images = 0
+        applied_notes = 0
+        slide_parts: list[str] = []
+        notes_parts: list[str] = []
+
+        for slide_index, raw_page in enumerate(pages, start=1):
+            page = raw_page if isinstance(raw_page, dict) else {}
+            slide_root = deepcopy(base_slide_root)
+            slide_rels_root = deepcopy(base_slide_rels_root)
+            notes_root = deepcopy(base_notes_root) if base_notes_root is not None else None
+
+            text_applied, text_ignored = _apply_text_fields_openxml(slide_root, page.get("fields"))
+            applied_text += text_applied
+            ignored_text += text_ignored
+
+            image_applied, image_ignored = _apply_images_openxml(
+                slide_root,
+                slide_rels_root,
+                page.get("images"),
+                media_dir=media_dir,
+                assets_base_dir=assets_base_dir,
+                slide_index=slide_index,
+            )
+            applied_images += image_applied
+            ignored_images += image_ignored
+
+            notes_value = page.get("notes")
+            if notes_root is not None:
+                if notes_value is not None and str(notes_value).strip():
+                    if _try_set_slide_notes_openxml(notes_root, str(notes_value)):
+                        applied_notes += 1
+                notes_part = f"ppt/notesSlides/notesSlide{slide_index}.xml"
+                _set_relationship_target(slide_rels_root, rel_type=NOTES_REL_TYPE, target=f"../notesSlides/notesSlide{slide_index}.xml")
+                _write_xml_part(work_dir, notes_part, notes_root)
+                notes_parts.append(notes_part)
+            else:
+                _remove_relationships_by_type(slide_rels_root, NOTES_REL_TYPE)
+
+            slide_part = f"ppt/slides/slide{slide_index}.xml"
+            slide_parts.append(slide_part)
+            _write_xml_part(work_dir, slide_part, slide_root)
+            _write_xml_part(work_dir, _to_rels_path(slide_part), slide_rels_root)
+
+        _rebuild_presentation_slides(presentation_root, presentation_rels_root, slide_parts)
+        _rebuild_content_types(content_types_root, slide_parts, notes_parts, media_dir)
+
+        _write_xml_part(work_dir, "ppt/presentation.xml", presentation_root)
+        _write_xml_part(work_dir, "ppt/_rels/presentation.xml.rels", presentation_rels_root)
+        _write_xml_part(work_dir, "[Content_Types].xml", content_types_root)
+
+        if out_path.exists():
+            out_path.unlink()
+        _write_zip_from_directory(work_dir, out_path)
+
+        return ComposeStats(
+            slide_count=len(slide_parts),
+            applied_text_fields=applied_text,
+            ignored_text_fields=ignored_text,
+            applied_images=applied_images,
+            ignored_images=ignored_images,
+            applied_notes=applied_notes,
+        )
+    except ComposeError:
+        raise
+    except ET.ParseError as exc:
+        raise ComposeError(f"Malformed .pptx XML: {exc}") from exc
+    except OSError as exc:
+        raise ComposeError(f"Unable to compose .pptx file: {exc}") from exc
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _apply_text_fields_openxml(slide_root: ET.Element, fields: Any) -> tuple[int, int]:
+    if not isinstance(fields, dict):
+        return 0, 0
+    sp_tree = _find_sp_tree(slide_root)
+    if sp_tree is None:
+        return 0, len(fields)
+
+    applied = ignored = 0
+    for key, value in dict(fields).items():
+        target = _find_named_slide_element(sp_tree, str(key))
+        if target is None or _local_name(target[1].tag) != "sp":
+            ignored += 1
+            continue
+        if _set_text_body(target[1], str(value if value is not None else "")):
+            applied += 1
+        else:
+            ignored += 1
+    return applied, ignored
+
+
+def _apply_images_openxml(
+    slide_root: ET.Element,
+    slide_rels_root: ET.Element,
+    images: Any,
+    *,
+    media_dir: Path,
+    assets_base_dir: Path | None,
+    slide_index: int,
+) -> tuple[int, int]:
+    if not isinstance(images, dict):
+        return 0, 0
+    sp_tree = _find_sp_tree(slide_root)
+    if sp_tree is None:
+        return 0, len(images)
+
+    applied = ignored = 0
+    for key, raw_path in dict(images).items():
+        name = str(key)
+        target = _find_named_slide_element(sp_tree, name)
+        if target is None:
+            ignored += 1
+            continue
+
+        image_path = _resolve_image_path(str(raw_path), assets_base_dir)
+        if not image_path.exists() or not image_path.is_file():
+            ignored += 1
+            continue
+
+        if _image_content_type(image_path) is None:
+            ignored += 1
+            continue
+
+        _, element, c_nvpr = target
+        xfrm = _extract_shape_transform(element)
+        if c_nvpr is None or xfrm is None:
+            ignored += 1
+            continue
+
+        copied_name = _copy_media_asset(image_path, media_dir, slide_index=slide_index, shape_name=name)
+        rel_id = _append_relationship(slide_rels_root, rel_type=IMAGE_REL_TYPE, target=f"../media/{copied_name}")
+        sp_tree[target[0]] = _build_picture_element(c_nvpr, xfrm, rel_id)
+        applied += 1
+    return applied, ignored
+
+
+def _try_set_slide_notes_openxml(notes_root: ET.Element, text: str) -> bool:
+    for shape in notes_root.findall("./p:cSld/p:spTree/p:sp", XML_NS):
+        ph = shape.find("./p:nvSpPr/p:nvPr/p:ph", XML_NS)
+        if ph is None or ph.get("type") != "body":
+            continue
+        return _set_text_body(shape, text)
+    return False
+
+
 def _find_shape_by_name(shapes, name: str):
     try:
         count = int(getattr(shapes, "Count"))
@@ -291,11 +501,7 @@ def _find_shape_by_name(shapes, name: str):
 
 
 def _try_set_slide_notes(slide, text: str, *, placeholder_shape_type: int, body_type: int) -> bool:
-    """
-    Best-effort: set speaker notes in the notes body placeholder.
-
-    Returns True if we found a body placeholder and wrote text.
-    """
+    """Best-effort: set speaker notes in the notes body placeholder."""
     try:
         notes_page = slide.NotesPage
         shapes = notes_page.Shapes
@@ -317,11 +523,274 @@ def _try_set_slide_notes(slide, text: str, *, placeholder_shape_type: int, body_
                 continue
             if not getattr(shape, "HasTextFrame", 0):
                 continue
-            tf = shape.TextFrame
-            tr = tf.TextRange
-            tr.Text = text
+            shape.TextFrame.TextRange.Text = text
             return True
         except Exception:
             continue
     return False
+
+
+def _find_sp_tree(slide_root: ET.Element) -> ET.Element | None:
+    return slide_root.find("./p:cSld/p:spTree", XML_NS)
+
+
+def _find_named_slide_element(sp_tree: ET.Element, name: str) -> tuple[int, ET.Element, ET.Element | None] | None:
+    for index, child in enumerate(list(sp_tree)):
+        c_nvpr = _find_non_visual_properties(child)
+        if c_nvpr is not None and str(c_nvpr.get("name", "")) == name:
+            return index, child, c_nvpr
+    return None
+
+
+def _find_non_visual_properties(element: ET.Element) -> ET.Element | None:
+    tag = _local_name(element.tag)
+    if tag == "sp":
+        return element.find("./p:nvSpPr/p:cNvPr", XML_NS)
+    if tag == "pic":
+        return element.find("./p:nvPicPr/p:cNvPr", XML_NS)
+    return None
+
+
+def _extract_shape_transform(element: ET.Element) -> ET.Element | None:
+    return element.find("./p:spPr/a:xfrm", XML_NS)
+
+
+def _set_text_body(shape: ET.Element, text: str) -> bool:
+    tx_body = shape.find("./p:txBody", XML_NS)
+    if tx_body is None:
+        return False
+
+    body_pr = deepcopy(tx_body.find("./a:bodyPr", XML_NS))
+    if body_pr is None:
+        body_pr = ET.Element(_qn(DML_NS, "bodyPr"))
+    lst_style = deepcopy(tx_body.find("./a:lstStyle", XML_NS))
+    if lst_style is None:
+        lst_style = ET.Element(_qn(DML_NS, "lstStyle"))
+    tx_body.clear()
+    tx_body.append(body_pr)
+    tx_body.append(lst_style)
+    for paragraph_text in text.splitlines() or [""]:
+        tx_body.append(_build_text_paragraph(paragraph_text))
+    return True
+
+
+def _build_text_paragraph(text: str) -> ET.Element:
+    paragraph = ET.Element(_qn(DML_NS, "p"))
+    if not text:
+        return paragraph
+    run = ET.SubElement(paragraph, _qn(DML_NS, "r"))
+    node = ET.SubElement(run, _qn(DML_NS, "t"))
+    if text != text.strip() or "  " in text:
+        node.set(XML_SPACE, "preserve")
+    node.text = text
+    return paragraph
+
+
+def _build_picture_element(c_nvpr: ET.Element, xfrm: ET.Element, rel_id: str) -> ET.Element:
+    pic = ET.Element(_qn(PML_NS, "pic"))
+    nv_pic_pr = ET.SubElement(pic, _qn(PML_NS, "nvPicPr"))
+    nv_pic_pr.append(deepcopy(c_nvpr))
+    ET.SubElement(nv_pic_pr, _qn(PML_NS, "cNvPicPr"))
+    ET.SubElement(nv_pic_pr, _qn(PML_NS, "nvPr"))
+
+    blip_fill = ET.SubElement(pic, _qn(PML_NS, "blipFill"))
+    blip = ET.SubElement(blip_fill, _qn(DML_NS, "blip"))
+    blip.set(f"{{{DOC_REL_NS}}}embed", rel_id)
+    stretch = ET.SubElement(blip_fill, _qn(DML_NS, "stretch"))
+    ET.SubElement(stretch, _qn(DML_NS, "fillRect"))
+
+    sp_pr = ET.SubElement(pic, _qn(PML_NS, "spPr"))
+    sp_pr.append(deepcopy(xfrm))
+    prst_geom = ET.SubElement(sp_pr, _qn(DML_NS, "prstGeom"))
+    prst_geom.set("prst", "rect")
+    ET.SubElement(prst_geom, _qn(DML_NS, "avLst"))
+    return pic
+
+
+def _resolve_primary_slide_path(presentation_root: ET.Element, presentation_rels_root: ET.Element) -> str | None:
+    sld_id = presentation_root.find("./p:sldIdLst/p:sldId", XML_NS)
+    rel_id = sld_id.get(f"{{{DOC_REL_NS}}}id") if sld_id is not None else None
+    return _resolve_related_part_path("ppt/presentation.xml", presentation_rels_root, SLIDE_REL_TYPE, rel_id=rel_id)
+
+
+def _resolve_related_part_path(source_part: str, rels_root: ET.Element, rel_type: str, *, rel_id: str | None = None) -> str | None:
+    for relationship in rels_root.findall("./rel:Relationship", XML_NS):
+        if rel_id is not None and relationship.get("Id") != rel_id:
+            continue
+        if relationship.get("Type") != rel_type:
+            continue
+        target = relationship.get("Target", "")
+        if not target:
+            continue
+        return posixpath.normpath(posixpath.join(posixpath.dirname(source_part), target))
+    return None
+
+
+def _read_xml_part(work_dir: Path, part_path: str | None, *, required: bool = True) -> ET.Element | None:
+    if not part_path:
+        return None
+    xml_path = work_dir / Path(part_path)
+    if not xml_path.exists():
+        if required:
+            raise ComposeError(f"Invalid .pptx package: missing {part_path}")
+        return None
+    try:
+        return ET.parse(xml_path).getroot()
+    except ET.ParseError as exc:
+        raise ComposeError(f"Malformed .pptx XML: {exc}") from exc
+
+
+def _write_xml_part(work_dir: Path, part_path: str, root: ET.Element) -> None:
+    xml_path = work_dir / Path(part_path)
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    ET.ElementTree(root).write(xml_path, encoding="utf-8", xml_declaration=True)
+
+
+def _to_rels_path(part_path: str) -> str:
+    parent = posixpath.dirname(part_path)
+    base = posixpath.basename(part_path)
+    return f"{parent}/_rels/{base}.rels"
+
+
+def _new_relationships_root() -> ET.Element:
+    return ET.Element(_qn(PKG_REL_NS, "Relationships"))
+
+
+def _append_relationship(rels_root: ET.Element, *, rel_type: str, target: str) -> str:
+    rel_id = f"rId{_next_relationship_index(rels_root)}"
+    relationship = ET.SubElement(rels_root, _qn(PKG_REL_NS, "Relationship"))
+    relationship.set("Id", rel_id)
+    relationship.set("Type", rel_type)
+    relationship.set("Target", target)
+    return rel_id
+
+
+def _set_relationship_target(rels_root: ET.Element, *, rel_type: str, target: str) -> None:
+    for relationship in rels_root.findall("./rel:Relationship", XML_NS):
+        if relationship.get("Type") == rel_type:
+            relationship.set("Target", target)
+            return
+    _append_relationship(rels_root, rel_type=rel_type, target=target)
+
+
+def _remove_relationships_by_type(rels_root: ET.Element, rel_type: str) -> None:
+    for relationship in list(rels_root.findall("./rel:Relationship", XML_NS)):
+        if relationship.get("Type") == rel_type:
+            rels_root.remove(relationship)
+
+
+def _next_relationship_index(rels_root: ET.Element) -> int:
+    highest = 0
+    for relationship in rels_root.findall("./rel:Relationship", XML_NS):
+        rel_id = relationship.get("Id", "")
+        match = re.fullmatch(r"rId(\d+)", rel_id)
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def _rebuild_presentation_slides(presentation_root: ET.Element, presentation_rels_root: ET.Element, slide_parts: list[str]) -> None:
+    sld_id_lst = presentation_root.find("./p:sldIdLst", XML_NS)
+    existing_ids = [
+        int(node.get("id", "255"))
+        for node in presentation_root.findall("./p:sldIdLst/p:sldId", XML_NS)
+        if str(node.get("id", "")).isdigit()
+    ]
+    if sld_id_lst is None:
+        sld_id_lst = ET.Element(_qn(PML_NS, "sldIdLst"))
+        presentation_root.insert(0, sld_id_lst)
+    else:
+        for child in list(sld_id_lst):
+            sld_id_lst.remove(child)
+    next_slide_id = max(existing_ids or [255]) + 1
+
+    _remove_relationships_by_type(presentation_rels_root, SLIDE_REL_TYPE)
+    next_rel_index = _next_relationship_index(presentation_rels_root)
+    for slide_part in slide_parts:
+        rel_id = f"rId{next_rel_index}"
+        next_rel_index += 1
+        relationship = ET.SubElement(presentation_rels_root, _qn(PKG_REL_NS, "Relationship"))
+        relationship.set("Id", rel_id)
+        relationship.set("Type", SLIDE_REL_TYPE)
+        relationship.set("Target", posixpath.relpath(slide_part, posixpath.dirname("ppt/presentation.xml")))
+
+        slide_id = ET.SubElement(sld_id_lst, _qn(PML_NS, "sldId"))
+        slide_id.set("id", str(next_slide_id))
+        slide_id.set(f"{{{DOC_REL_NS}}}id", rel_id)
+        next_slide_id += 1
+
+
+def _rebuild_content_types(
+    content_types_root: ET.Element,
+    slide_parts: list[str],
+    notes_parts: list[str],
+    media_dir: Path,
+) -> None:
+    for override in list(content_types_root.findall("./ct:Override", XML_NS)):
+        part_name = override.get("PartName", "")
+        if part_name.startswith("/ppt/slides/slide") or part_name.startswith("/ppt/notesSlides/notesSlide"):
+            content_types_root.remove(override)
+
+    for slide_part in slide_parts:
+        override = ET.SubElement(content_types_root, _qn(CONTENT_TYPES_NS, "Override"))
+        override.set("PartName", f"/{slide_part}")
+        override.set("ContentType", "application/vnd.openxmlformats-officedocument.presentationml.slide+xml")
+
+    for notes_part in notes_parts:
+        override = ET.SubElement(content_types_root, _qn(CONTENT_TYPES_NS, "Override"))
+        override.set("PartName", f"/{notes_part}")
+        override.set("ContentType", "application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml")
+
+    existing_defaults = {
+        node.get("Extension", "").lower()
+        for node in content_types_root.findall("./ct:Default", XML_NS)
+    }
+    media_files = sorted(media_dir.iterdir()) if media_dir.exists() else []
+    for media_file in media_files:
+        extension = media_file.suffix.lower().lstrip(".")
+        if not extension or extension in existing_defaults:
+            continue
+        content_type = _image_content_type(media_file)
+        if content_type is None:
+            continue
+        default = ET.SubElement(content_types_root, _qn(CONTENT_TYPES_NS, "Default"))
+        default.set("Extension", extension)
+        default.set("ContentType", content_type)
+        existing_defaults.add(extension)
+
+
+def _copy_media_asset(image_path: Path, media_dir: Path, *, slide_index: int, shape_name: str) -> str:
+    safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", shape_name).strip("_") or "image"
+    suffix = image_path.suffix.lower()
+    candidate = f"compose-{slide_index:03d}-{safe_name}{suffix}"
+    destination = media_dir / candidate
+    dedupe = 1
+    while destination.exists():
+        candidate = f"compose-{slide_index:03d}-{safe_name}-{dedupe}{suffix}"
+        destination = media_dir / candidate
+        dedupe += 1
+    shutil.copy2(image_path, destination)
+    return candidate
+
+
+def _image_content_type(path: Path) -> str | None:
+    guessed, _ = mimetypes.guess_type(path.name)
+    if guessed and guessed.startswith("image/"):
+        return guessed
+    return None
+
+
+def _write_zip_from_directory(source_dir: Path, out_path: Path) -> None:
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(source_dir.rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(source_dir).as_posix())
+
+
+def _qn(namespace: str, tag: str) -> str:
+    return f"{{{namespace}}}{tag}"
+
+
+def _local_name(tag: str) -> str:
+    return tag.split("}", 1)[-1]
 
