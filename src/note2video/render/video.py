@@ -270,10 +270,12 @@ def render_video(
     _write_ffconcat(root=root, slides=slides, concat_file=concat_file)
     ffmpeg = _get_ffmpeg_path()
 
-    # Optional: mix background music with narration audio.
+    # Optional: mix background music with narration audio, or adjust narration gain
+    # even when no BGM is present so the volume knob always affects the output.
     mix_used = False
     mix_info = ""
     mux_audio_path = audio_path
+    narration_gain = float(narration_volume)
     if bgm_path:
         bgm = Path(bgm_path)
         if not bgm.exists():
@@ -296,7 +298,7 @@ def render_video(
                 str(bgm),
                 "-filter_complex",
                 (
-                    f"[0:a]volume={narration_volume:.3f}[nar];"
+                    f"[0:a]volume={narration_gain:.3f}[nar];"
                     f"[1:a]volume={bgm_volume:.3f},"
                     f"afade=t=in:st=0:d={fade_in:.3f},"
                     f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
@@ -320,12 +322,31 @@ def render_video(
         mix_info = (
             f"bgm: {bgm}\n"
             f"bgm_volume: {bgm_volume}\n"
-            f"narration_volume: {narration_volume}\n"
+            f"narration_volume: {narration_gain}\n"
             f"bgm_fade_in_s: {fade_in}\n"
             f"bgm_fade_out_s: {fade_out}\n"
             f"narration_duration_s: {narration_duration_s:.3f}\n"
         )
         mux_audio_path = mixed_audio
+    elif abs(narration_gain - 1.0) > 1e-9:
+        adjusted_audio = audio_dir / "narration_adjusted.m4a"
+        _run_ffmpeg(
+            [
+                ffmpeg,
+                "-y",
+                "-i",
+                str(audio_path),
+                "-filter:a",
+                f"volume={narration_gain:.3f}",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                str(adjusted_audio),
+            ]
+        )
+        mix_info = f"narration_volume: {narration_gain}\n"
+        mux_audio_path = adjusted_audio
 
     _run_ffmpeg(
         [

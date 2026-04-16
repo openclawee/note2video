@@ -1,4 +1,4 @@
-"""Regression: BGM volume must apply linearly; ffmpeg amix normalize must be off."""
+"""Regression coverage for render-time audio gain controls."""
 
 from __future__ import annotations
 
@@ -11,8 +11,7 @@ import pytest
 from note2video.render.video import render_video
 
 
-def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = tmp_path / "proj"
+def _write_render_project(root: Path) -> None:
     audio_dir = root / "audio"
     video_dir = root / "video"
     slides_dir = root / "slides"
@@ -30,8 +29,6 @@ def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.Monke
         wf.setframerate(44_100)
         wf.writeframes(b"\x00\x00" * 44_100)
     (subtitles_dir / "subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
-    bgm = root / "bgm.mp3"
-    bgm.write_bytes(b"fake-mp3")
 
     (root / "manifest.json").write_text(
         json.dumps(
@@ -56,8 +53,8 @@ def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.Monke
         encoding="utf-8",
     )
 
-    commands: list[list[str]] = []
 
+def _fake_run_ffmpeg_factory(commands: list[list[str]]):
     def fake_run_ffmpeg(command: list[str]) -> None:
         commands.append(command)
         out = command[-1]
@@ -65,11 +62,22 @@ def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.Monke
             Path(out).write_bytes(b"video-only")
         elif out.endswith("output.mp4"):
             Path(out).write_bytes(b"video-final")
-        elif out.endswith("mixed.m4a"):
-            Path(out).write_bytes(b"mixed-audio")
+        elif out.endswith("mixed.m4a") or out.endswith("narration_adjusted.m4a"):
+            Path(out).write_bytes(b"audio-final")
+
+    return fake_run_ffmpeg
+
+
+def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "proj"
+    _write_render_project(root)
+    bgm = root / "bgm.mp3"
+    bgm.write_bytes(b"fake-mp3")
+
+    commands: list[list[str]] = []
 
     monkeypatch.setattr("note2video.render.video._get_ffmpeg_path", lambda: "ffmpeg")
-    monkeypatch.setattr("note2video.render.video._run_ffmpeg", fake_run_ffmpeg)
+    monkeypatch.setattr("note2video.render.video._run_ffmpeg", _fake_run_ffmpeg_factory(commands))
 
     render_video(str(root), bgm_path=str(bgm), bgm_volume=0.05, narration_volume=1.0)
 
@@ -80,3 +88,25 @@ def test_bgm_mix_uses_amix_without_normalize(tmp_path, monkeypatch: pytest.Monke
     assert "volume=0.050" in graph
     assert "normalize=0" in graph
     assert "alimiter=limit=0.98:level=0" in graph
+
+
+def test_narration_volume_without_bgm_creates_adjusted_audio(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "proj"
+    _write_render_project(root)
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr("note2video.render.video._get_ffmpeg_path", lambda: "ffmpeg")
+    monkeypatch.setattr("note2video.render.video._run_ffmpeg", _fake_run_ffmpeg_factory(commands))
+
+    render_video(str(root), narration_volume=0.65)
+
+    audio_cmds = [c for c in commands if "narration_adjusted.m4a" in c[-1]]
+    assert audio_cmds, "expected narration-only render to create adjusted audio"
+    assert "-filter:a" in audio_cmds[0]
+    filter_idx = audio_cmds[0].index("-filter:a") + 1
+    assert audio_cmds[0][filter_idx] == "volume=0.650"
+
+    mux_cmds = [c for c in commands if c[-1].endswith("output.mp4")]
+    assert mux_cmds, "expected final mux command"
+    adjusted_path = str(root / "audio" / "narration_adjusted.m4a")
+    assert adjusted_path in mux_cmds[0]
