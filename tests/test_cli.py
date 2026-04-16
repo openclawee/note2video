@@ -254,17 +254,36 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr("note2video.render.video._run_ffmpeg", fake_run_ffmpeg)
 
-    exit_code = main(["render", str(project_dir), "--ratio", "9:16", "--json"])
+    exit_code = main(
+        [
+            "render",
+            str(project_dir),
+            "--ratio",
+            "9:16",
+            "--resolution",
+            "720p",
+            "--fps",
+            "24",
+            "--quality",
+            "high",
+            "--json",
+        ]
+    )
 
     assert exit_code == 0
     manifest = json.loads((project_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["outputs"]["video"] == "video/output.mp4"
     assert manifest["ratio"] == "9:16"
+    assert manifest["resolution"] == "720p"
+    assert manifest["fps"] == 24
+    assert manifest["quality"] == "high"
     assert (project_dir / "video" / "output.mp4").exists()
     first_command = commands[0]
-    # 1080p standardization filter is applied before fps/format.
-    assert any("fps=30,format=yuv420p" in str(x) for x in first_command)
-    assert any("scale=1080:1920" in str(x) for x in first_command)
+    assert any("fps=24,format=yuv420p" in str(x) for x in first_command)
+    assert any("scale=720:1280" in str(x) for x in first_command)
+    assert "24" in first_command
+    assert "slow" in first_command
+    assert "19" in first_command
     assert "vfr" not in first_command
     assert not (project_dir / "video" / "video_only.mp4").exists()
     assert not (project_dir / "video" / "slides.ffconcat").exists()
@@ -320,6 +339,9 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
         output_path=None,
         *,
         ratio="16:9",
+        resolution="1080p",
+        fps=30,
+        quality="standard",
         bgm_path=None,
         bgm_volume=0.18,
         bgm_fade_in_s=0.0,
@@ -334,6 +356,9 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
                 "render",
                 project_dir,
                 ratio,
+                resolution,
+                fps,
+                quality,
                 bgm_path,
                 bgm_volume,
                 bgm_fade_in_s,
@@ -358,6 +383,12 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
             str(output_dir),
             "--pages",
             "1-3",
+            "--resolution",
+            "1440p",
+            "--fps",
+            "60",
+            "--quality",
+            "high",
             "--tts-provider",
             "pyttsx3",
             "--script-text",
@@ -370,7 +401,156 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
     assert calls[0] == ("extract", str(input_file), str(output_dir), "1-3")
     assert calls[1][0] == "voice"
     assert calls[2][0] == "subtitle"
-    assert calls[3] == ("render", str(output_dir), "16:9", None, 0.18, 0.0, 0.0, 1.0, None, None)
+    assert calls[3] == ("render", str(output_dir), "16:9", "1440p", 60, "high", None, 0.18, 0.0, 0.0, 1.0, None, None)
+
+
+def test_build_command_uses_config_file_without_input_and_cli_overrides(tmp_path, monkeypatch) -> None:
+    input_file = tmp_path / "demo.pptx"
+    output_dir = tmp_path / "from-profile"
+    input_file.write_bytes(b"placeholder")
+    script_file = tmp_path / "scripts" / "override.txt"
+    script_file.parent.mkdir(parents=True)
+    script_file.write_text("S1\n\nS2", encoding="utf-8")
+    profile_path = tmp_path / "build.json"
+    profile_path.write_text(
+        json.dumps(
+            {
+                "input": {
+                    "file": "./demo.pptx",
+                    "pages": "1-2",
+                    "script_file": "./scripts/override.txt",
+                },
+                "output": {"dir": "./from-profile"},
+                "video": {"ratio": "9:16", "resolution": "720p", "fps": 24, "quality": "high"},
+                "tts": {"provider": "edge", "voice_id": "edge-voice", "rate": 1.2},
+                "audio": {"bgm_volume": 0.25},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    calls = []
+
+    def fake_extract(input_path, out_dir, pages=None):
+        calls.append(("extract", input_path, out_dir, pages))
+        scripts_dir = output_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "script.json").write_text('{"slides":[]}', encoding="utf-8")
+        (output_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "project_name": "demo",
+                    "input_file": str(input_file),
+                    "slide_count": 2,
+                    "outputs": {},
+                    "slides": [{"page": 1, "title": "A"}, {"page": 2, "title": "B"}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(slide_count=2)
+
+    def fake_voice(input_json, out_dir, *, provider_name="pyttsx3", voice_id="", tts_rate=1.0, minimax_base_url=None):
+        calls.append(("voice", input_json, out_dir, provider_name, voice_id, tts_rate, minimax_base_url))
+        return {"provider": provider_name, "slide_count": 2, "tts_rate": tts_rate}
+
+    def fake_subtitle(input_json, out_dir):
+        calls.append(("subtitle", input_json, out_dir))
+        return {"segment_count": 2}
+
+    def fake_render(project_dir, output_path=None, **kwargs):
+        calls.append(("render", project_dir, kwargs))
+        return {"video": "video/output.mp4", "subtitles_burned": True}
+
+    monkeypatch.setattr("note2video.cli.main.extract_project", fake_extract)
+    monkeypatch.setattr("note2video.cli.main.generate_voice_assets", fake_voice)
+    monkeypatch.setattr("note2video.cli.main.generate_subtitles", fake_subtitle)
+    monkeypatch.setattr("note2video.cli.main.render_video", fake_render)
+
+    exit_code = main(
+        [
+            "build",
+            "--config",
+            str(profile_path),
+            "--ratio",
+            "1:1",
+            "--fps",
+            "30",
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    assert calls[0] == ("extract", str(input_file), str(output_dir), "1-2")
+    assert calls[1] == ("voice", str(output_dir / "scripts" / "script.json"), str(output_dir), "edge", "edge-voice", 1.2, None)
+    assert calls[3][0] == "render"
+    assert calls[3][1] == str(output_dir)
+    assert calls[3][2]["ratio"] == "1:1"
+    assert calls[3][2]["resolution"] == "720p"
+    assert calls[3][2]["fps"] == 30
+    assert calls[3][2]["quality"] == "high"
+    assert calls[3][2]["bgm_volume"] == 0.25
+
+
+def test_build_command_save_config_writes_effective_profile(tmp_path, monkeypatch) -> None:
+    input_file = tmp_path / "demo.pptx"
+    output_dir = tmp_path / "dist"
+    input_file.write_bytes(b"placeholder")
+    save_path = tmp_path / "saved.build.json"
+
+    def fake_extract(input_path, out_dir, pages=None):
+        scripts_dir = output_dir / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "script.json").write_text('{"slides":[]}', encoding="utf-8")
+        (output_dir / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "project_name": "demo",
+                    "input_file": str(input_file),
+                    "slide_count": 1,
+                    "outputs": {},
+                    "slides": [{"page": 1, "title": "A"}],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(slide_count=1)
+
+    monkeypatch.setattr("note2video.cli.main.extract_project", fake_extract)
+    monkeypatch.setattr(
+        "note2video.cli.main.generate_voice_assets",
+        lambda *args, **kwargs: {"provider": "edge", "slide_count": 1, "tts_rate": kwargs.get("tts_rate", 1.0)},
+    )
+    monkeypatch.setattr("note2video.cli.main.generate_subtitles", lambda *_args, **_kwargs: {"segment_count": 1})
+    monkeypatch.setattr("note2video.cli.main.render_video", lambda *_args, **_kwargs: {"video": "video/output.mp4", "subtitles_burned": True})
+
+    exit_code = main(
+        [
+            "build",
+            str(input_file),
+            "--out",
+            str(output_dir),
+            "--resolution",
+            "720p",
+            "--fps",
+            "24",
+            "--quality",
+            "high",
+            "--save-config",
+            str(save_path),
+            "--json",
+        ]
+    )
+
+    assert exit_code == 0
+    payload = json.loads(save_path.read_text(encoding="utf-8"))
+    assert payload["video"]["resolution"] == "720p"
+    assert payload["video"]["fps"] == 24
+    assert payload["video"]["quality"] == "high"
+    assert payload["input"]["file"] == str(input_file)
 
 
 def test_extract_command_writes_expected_files(tmp_path, monkeypatch) -> None:

@@ -16,6 +16,12 @@ from note2video.app.pipeline_service import (
     run_build_pipeline,
     run_extract_pipeline,
 )
+from note2video.build_profile import (
+    build_profile_to_request_kwargs,
+    load_build_profile,
+    request_kwargs_to_build_profile,
+    save_build_profile,
+)
 
 PREVIEW_SAMPLE_TEXT = "你好，这是一段音色试听。"
 
@@ -112,6 +118,9 @@ class JobConfig:
     voice_id: str
     tts_rate: float
     ratio: str = "16:9"
+    resolution: str = "1080p"
+    fps: int = 30
+    quality: str = "standard"
     # Build 且非空时覆盖 PPT 备注（与 CLI --script-text/--script-file 语义一致）。
     script_text: str = ""
     # 仅 QProcess：启动前写入临时文件路径，避免 Windows 命令行长度限制。
@@ -231,6 +240,9 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
         out_dir=str(config.out_dir),
         pages=config.pages,
         ratio=str(config.ratio or "16:9"),
+        resolution=str(config.resolution or "1080p"),
+        fps=int(config.fps or 30),
+        quality=str(config.quality or "standard"),
         tts_provider="edge",
         voice_id=config.voice_id,
         tts_rate=float(config.tts_rate),
@@ -251,6 +263,83 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
         subtitle_font=config.subtitle_font,
         subtitle_size=config.subtitle_size,
         subtitle_y_ratio=config.subtitle_y_ratio,
+    )
+
+
+def _job_config_to_build_profile(config: JobConfig) -> dict[str, Any]:
+    return request_kwargs_to_build_profile(
+        {
+            "input_file": str(config.pptx_path),
+            "out_dir": str(config.out_dir),
+            "pages": config.pages,
+            "ratio": config.ratio,
+            "resolution": config.resolution,
+            "fps": int(config.fps),
+            "quality": config.quality,
+            "tts_provider": config.tts_provider,
+            "voice_id": config.voice_id,
+            "tts_rate": float(config.tts_rate),
+            "script_text": config.script_text,
+            "script_file": config.script_temp_path,
+            "bgm_path": config.bgm_path,
+            "bgm_volume": float(config.bgm_volume),
+            "narration_volume": float(config.narration_volume),
+            "bgm_fade_in_s": float(config.bgm_fade_in_s),
+            "bgm_fade_out_s": float(config.bgm_fade_out_s),
+            "subtitle_color": config.subtitle_color,
+            "subtitle_font": config.subtitle_font,
+            "subtitle_size": config.subtitle_size,
+            "subtitle_y_ratio": config.subtitle_y_ratio,
+            "subtitle_fade_in_ms": int(config.subtitle_fade_in_ms or 80),
+            "subtitle_fade_out_ms": int(config.subtitle_fade_out_ms or 120),
+            "subtitle_scale_from": int(config.subtitle_scale_from or 100),
+            "subtitle_scale_to": int(config.subtitle_scale_to or 104),
+            "subtitle_outline": int(config.subtitle_outline or 1),
+            "subtitle_shadow": int(config.subtitle_shadow or 0),
+        }
+    )
+
+
+def _job_config_from_build_profile(
+    profile: dict[str, Any],
+    *,
+    profile_path: str | Path | None = None,
+) -> JobConfig:
+    values = build_profile_to_request_kwargs(profile, profile_path=profile_path)
+    return JobConfig(
+        mode="build",
+        pptx_path=Path(str(values.get("input_file") or "")),
+        out_dir=Path(str(values.get("out_dir") or "./dist")),
+        pages=str(values.get("pages") or "all"),
+        ratio=str(values.get("ratio") or "16:9"),
+        resolution=str(values.get("resolution") or "1080p"),
+        fps=int(values.get("fps") or 30),
+        quality=str(values.get("quality") or "standard"),
+        tts_provider=str(values.get("tts_provider") or "edge"),
+        voice_id=str(values.get("voice_id") or ""),
+        tts_rate=float(values.get("tts_rate") or 1.0),
+        script_text=str(values.get("script_text") or ""),
+        script_temp_path=(str(values.get("script_file")) if values.get("script_file") else None),
+        minimax_base_url=None,
+        subtitle_color=(str(values.get("subtitle_color")) if values.get("subtitle_color") else None),
+        subtitle_fade_in_ms=int(values.get("subtitle_fade_in_ms") or 80),
+        subtitle_fade_out_ms=int(values.get("subtitle_fade_out_ms") or 120),
+        subtitle_scale_from=int(values.get("subtitle_scale_from") or 100),
+        subtitle_scale_to=int(values.get("subtitle_scale_to") or 104),
+        subtitle_outline=int(values.get("subtitle_outline") or 1),
+        subtitle_shadow=int(values.get("subtitle_shadow") or 0),
+        subtitle_font=(str(values.get("subtitle_font")) if values.get("subtitle_font") else None),
+        subtitle_size=(
+            int(values.get("subtitle_size")) if values.get("subtitle_size") is not None else None
+        ),
+        subtitle_y_ratio=(
+            float(values.get("subtitle_y_ratio")) if values.get("subtitle_y_ratio") is not None else None
+        ),
+        bgm_path=(str(values.get("bgm_path")) if values.get("bgm_path") else None),
+        bgm_volume=float(values.get("bgm_volume") or 0.18),
+        narration_volume=float(values.get("narration_volume") or 1.0),
+        bgm_fade_in_s=float(values.get("bgm_fade_in_s") or 0.0),
+        bgm_fade_out_s=float(values.get("bgm_fade_out_s") or 0.0),
     )
 
 
@@ -297,6 +386,12 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
         str(config.pages or "all"),
         "--ratio",
         str(config.ratio or "16:9"),
+        "--resolution",
+        str(config.resolution or "1080p"),
+        "--fps",
+        str(int(config.fps or 30)),
+        "--quality",
+        str(config.quality or "standard"),
         "--tts-provider",
         "edge",
         "--voice",

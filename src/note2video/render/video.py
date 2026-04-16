@@ -34,6 +34,45 @@ def _ratio_canvas_size(ratio: str) -> tuple[int, int]:
     return 1080, 1080
 
 
+def _normalize_resolution(value: str | None) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return "1080p"
+    if raw in {"720p", "1080p", "1440p"}:
+        return raw
+    raise RenderError(f"Unsupported resolution: {value!r}. Use 720p, 1080p, or 1440p.")
+
+
+def _scale_canvas_size(base_w: int, base_h: int, resolution: str) -> tuple[int, int]:
+    normalized = _normalize_resolution(resolution)
+    scale_map = {
+        "720p": 2.0 / 3.0,
+        "1080p": 1.0,
+        "1440p": 4.0 / 3.0,
+    }
+    scale = scale_map[normalized]
+    return int(round(base_w * scale)), int(round(base_h * scale))
+
+
+def _normalize_fps(value: int | str | None) -> int:
+    try:
+        fps = int(value)
+    except (TypeError, ValueError):
+        fps = 30
+    if fps < 1 or fps > 120:
+        raise RenderError(f"Unsupported fps: {value!r}. Use an integer between 1 and 120.")
+    return fps
+
+
+def _quality_encode_options(value: str | None) -> tuple[str, str]:
+    raw = str(value or "").strip().lower() or "standard"
+    if raw == "standard":
+        return "medium", "23"
+    if raw == "high":
+        return "slow", "19"
+    raise RenderError(f"Unsupported quality: {value!r}. Use standard or high.")
+
+
 def _wrap_config_from_subtitle_size(subtitle_size: int | None) -> tuple[int, int]:
     """
     Heuristic mapping from font size (1080p) to (max_chars_per_line, max_lines).
@@ -152,6 +191,9 @@ def render_video(
     output_path: str | None = None,
     *,
     ratio: str | None = None,
+    resolution: str | None = None,
+    fps: int = 30,
+    quality: str = "standard",
     bgm_path: str | None = None,
     bgm_volume: float = 0.18,
     narration_volume: float = 1.0,
@@ -179,7 +221,11 @@ def render_video(
         raise RenderError("No slides found in manifest.")
 
     normalized_ratio = _normalize_ratio(ratio or manifest.get("ratio"))
-    canvas_w, canvas_h = _ratio_canvas_size(normalized_ratio)
+    normalized_resolution = _normalize_resolution(resolution or manifest.get("resolution"))
+    normalized_fps = _normalize_fps(fps or manifest.get("fps"))
+    quality_preset, crf = _quality_encode_options(quality or manifest.get("quality"))
+    base_canvas_w, base_canvas_h = _ratio_canvas_size(normalized_ratio)
+    canvas_w, canvas_h = _scale_canvas_size(base_canvas_w, base_canvas_h, normalized_resolution)
 
     audio_path = root / manifest.get("outputs", {}).get("merged_audio", "audio/merged.wav")
     if not audio_path.exists():
@@ -359,16 +405,20 @@ def render_video(
             "-i",
             str(concat_file),
             "-vf",
-            # Standardize output to 1080p for predictable subtitle sizing.
+            # Standardize output canvas for predictable subtitle sizing.
             # Keep aspect ratio and pad to avoid stretching.
             f"scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=decrease,"
             f"pad={canvas_w}:{canvas_h}:(ow-iw)/2:(oh-ih)/2,"
             "setsar=1,"
-            "fps=30,format=yuv420p",
+            f"fps={normalized_fps},format=yuv420p",
             "-r",
-            "30",
+            str(normalized_fps),
             "-c:v",
             "libx264",
+            "-preset",
+            quality_preset,
+            "-crf",
+            crf,
             "-pix_fmt",
             "yuv420p",
             str(temp_video),
@@ -408,6 +458,10 @@ def render_video(
             subtitle_filter,
             "-c:v",
             "libx264",
+            "-preset",
+            quality_preset,
+            "-crf",
+            crf,
             "-pix_fmt",
             "yuv420p",
             "-c:a",
@@ -425,6 +479,9 @@ def render_video(
 
     outputs = manifest.setdefault("outputs", {})
     manifest["ratio"] = normalized_ratio
+    manifest["resolution"] = normalized_resolution
+    manifest["fps"] = normalized_fps
+    manifest["quality"] = quality
     outputs["video"] = _relative_path(root, target_video)
     outputs["video_subtitles_burned"] = subtitle_burned
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -433,6 +490,9 @@ def render_video(
     (logs_dir / "render.log").write_text(
         f"video: {target_video}\n"
         f"ratio: {normalized_ratio}\n"
+        f"resolution: {normalized_resolution}\n"
+        f"fps: {normalized_fps}\n"
+        f"quality: {quality}\n"
         f"canvas: {canvas_w}x{canvas_h}\n"
         f"subtitles_burned: {subtitle_burned}\n"
         f"audio: {mux_audio_path}\n"

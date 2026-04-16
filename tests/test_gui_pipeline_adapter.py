@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from note2video.app.pipeline_service import BuildRequest
-from note2video.gui.app import JobConfig, _build_cli_argv_for_config, _build_request_from_job_config, _run_extract_or_build
+from note2video.gui.app import (
+    JobConfig,
+    _build_cli_argv_for_config,
+    _build_request_from_job_config,
+    _job_config_from_build_profile,
+    _job_config_to_build_profile,
+    _run_extract_or_build,
+)
 
 
 def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
@@ -89,6 +97,9 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
         out_dir=tmp_path / "dist",
         pages="1-3",
         ratio="9:16",
+        resolution="1440p",
+        fps=60,
+        quality="high",
         tts_provider="edge",
         voice_id="zh-CN-XiaoxiaoNeural",
         tts_rate=1.25,
@@ -114,6 +125,9 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
     assert req.out_dir.endswith("dist")
     assert req.pages == "1-3"
     assert req.ratio == "9:16"
+    assert req.resolution == "1440p"
+    assert req.fps == 60
+    assert req.quality == "high"
     assert req.tts_provider == "edge"
     assert req.voice_id == "zh-CN-XiaoxiaoNeural"
     assert req.tts_rate == 1.25
@@ -141,6 +155,9 @@ def test_build_cli_argv_includes_script_file_when_temp_path_set(tmp_path) -> Non
         out_dir=tmp_path / "dist",
         pages="all",
         ratio="1:1",
+        resolution="720p",
+        fps=24,
+        quality="high",
         tts_provider="edge",
         voice_id="",
         tts_rate=1.0,
@@ -153,6 +170,9 @@ def test_build_cli_argv_includes_script_file_when_temp_path_set(tmp_path) -> Non
     assert "--ratio" in argv
     r = argv[argv.index("--ratio") + 1]
     assert r == "1:1"
+    assert argv[argv.index("--resolution") + 1] == "720p"
+    assert argv[argv.index("--fps") + 1] == "24"
+    assert argv[argv.index("--quality") + 1] == "high"
     assert "--subtitle-y-ratio" in argv
     y = float(argv[argv.index("--subtitle-y-ratio") + 1])
     assert abs(y - 0.88) < 1e-9
@@ -193,3 +213,57 @@ def test_run_pipeline_with_log_returns_error_and_trace_on_failure(monkeypatch, t
 
     assert exit_code == 1
     assert any("RuntimeError: extract failed for test" in line for line in logs)
+
+
+def test_job_config_profile_roundtrip(tmp_path) -> None:
+    cfg = JobConfig(
+        mode="build",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=tmp_path / "dist",
+        pages="2-4",
+        ratio="9:16",
+        resolution="720p",
+        fps=24,
+        quality="high",
+        tts_provider="edge",
+        voice_id="zh-CN-YunyangNeural",
+        tts_rate=1.15,
+        script_text="hello",
+        subtitle_color="#FFFFFF",
+        subtitle_fade_in_ms=90,
+        subtitle_fade_out_ms=110,
+        subtitle_scale_from=97,
+        subtitle_scale_to=105,
+        subtitle_outline=2,
+        subtitle_shadow=1,
+        subtitle_font="Microsoft YaHei",
+        subtitle_size=36,
+        subtitle_y_ratio=0.87,
+        bgm_path="bgm.mp3",
+        bgm_volume=0.22,
+        narration_volume=0.93,
+        bgm_fade_in_s=0.5,
+        bgm_fade_out_s=0.8,
+    )
+
+    profile = _job_config_to_build_profile(cfg)
+    assert profile["video"]["resolution"] == "720p"
+    assert profile["video"]["fps"] == 24
+    assert profile["video"]["quality"] == "high"
+
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
+    loaded = _job_config_from_build_profile(profile, profile_path=profile_path)
+
+    assert loaded.mode == "build"
+    assert loaded.pptx_path == tmp_path / "demo.pptx"
+    assert loaded.out_dir == tmp_path / "dist"
+    assert loaded.pages == "2-4"
+    assert loaded.ratio == "9:16"
+    assert loaded.resolution == "720p"
+    assert loaded.fps == 24
+    assert loaded.quality == "high"
+    assert loaded.voice_id == "zh-CN-YunyangNeural"
+    assert loaded.tts_rate == 1.15
+    assert loaded.script_text == "hello"
+    assert loaded.bgm_path == str((tmp_path / "bgm.mp3").resolve())
