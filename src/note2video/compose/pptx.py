@@ -326,7 +326,9 @@ def _compose_pptx_openxml(
             raise ComposeError("Template presentation has no slides.")
 
         base_slide_root = _read_xml_part(work_dir, base_slide_path)
-        base_slide_rels_root = _read_xml_part(work_dir, _to_rels_path(base_slide_path), required=False) or _new_relationships_root()
+        base_slide_rels_root = _read_xml_part(work_dir, _to_rels_path(base_slide_path), required=False)
+        if base_slide_rels_root is None:
+            base_slide_rels_root = _new_relationships_root()
         base_notes_path = _resolve_related_part_path(base_slide_path, base_slide_rels_root, NOTES_REL_TYPE)
         base_notes_root = _read_xml_part(work_dir, base_notes_path, required=False) if base_notes_path else None
 
@@ -558,8 +560,12 @@ def _set_text_body(shape: ET.Element, text: str) -> bool:
     if tx_body is None:
         return False
 
-    body_pr = deepcopy(tx_body.find("./a:bodyPr", XML_NS)) or ET.Element(_qn(DML_NS, "bodyPr"))
-    lst_style = deepcopy(tx_body.find("./a:lstStyle", XML_NS)) or ET.Element(_qn(DML_NS, "lstStyle"))
+    body_pr = deepcopy(tx_body.find("./a:bodyPr", XML_NS))
+    if body_pr is None:
+        body_pr = ET.Element(_qn(DML_NS, "bodyPr"))
+    lst_style = deepcopy(tx_body.find("./a:lstStyle", XML_NS))
+    if lst_style is None:
+        lst_style = ET.Element(_qn(DML_NS, "lstStyle"))
     tx_body.clear()
     tx_body.append(body_pr)
     tx_body.append(lst_style)
