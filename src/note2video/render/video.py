@@ -301,7 +301,10 @@ def render_video(
                     f"afade=t=in:st=0:d={fade_in:.3f},"
                     f"afade=t=out:st={fade_out_start:.3f}:d={fade_out:.3f}"
                     f"[bgm];"
-                    f"[nar][bgm]amix=inputs=2:duration=first:dropout_transition=2,alimiter=limit=0.98[a]"
+                    # amix defaults to normalize=1, which rescales inputs toward full scale and
+                    # largely cancels small BGM volume factors. normalize=0 keeps linear sum gain.
+                    f"[nar][bgm]amix=inputs=2:duration=first:dropout_transition=2:normalize=0,"
+                    f"alimiter=limit=0.98:level=0[a]"
                 ),
                 "-map",
                 "[a]",
