@@ -523,6 +523,29 @@ def _build_ui(QtWidgets, QtCore):
             io_grid.addWidget(QtWidgets.QLabel("比例"), 2, 2)
             io_grid.addWidget(self.ratio_combo, 2, 3)
 
+            self.resolution_combo = QtWidgets.QComboBox()
+            self.resolution_combo.addItem("720p", "720p")
+            self.resolution_combo.addItem("1080p", "1080p")
+            self.resolution_combo.addItem("1440p", "1440p")
+            self.resolution_combo.setCurrentIndex(1)
+            self.resolution_combo.setToolTip("输出分辨率预设。")
+            io_grid.addWidget(QtWidgets.QLabel("分辨率"), 3, 0)
+            io_grid.addWidget(self.resolution_combo, 3, 1)
+
+            self.fps_spin = QtWidgets.QSpinBox()
+            self.fps_spin.setRange(1, 120)
+            self.fps_spin.setValue(30)
+            self.fps_spin.setToolTip("输出视频帧率。")
+            io_grid.addWidget(QtWidgets.QLabel("FPS"), 3, 2)
+            io_grid.addWidget(self.fps_spin, 3, 3)
+
+            self.quality_combo = QtWidgets.QComboBox()
+            self.quality_combo.addItem("standard", "standard")
+            self.quality_combo.addItem("high", "high")
+            self.quality_combo.setToolTip("输出编码质量预设。")
+            io_grid.addWidget(QtWidgets.QLabel("质量"), 4, 0)
+            io_grid.addWidget(self.quality_combo, 4, 1)
+
             # Spacer to keep grid compact
             # (ratio occupies col 2-3)
 
@@ -735,8 +758,14 @@ def _build_ui(QtWidgets, QtCore):
             script_group = QtWidgets.QGroupBox("旁白脚本（可选）")
             script_outer = QtWidgets.QVBoxLayout(script_group)
             script_btn_row = QtWidgets.QHBoxLayout()
+            self.profile_import_btn = QtWidgets.QPushButton("导入配置…")
+            self.profile_import_btn.setToolTip("从 build profile JSON 回填当前表单。")
+            self.profile_export_btn = QtWidgets.QPushButton("导出配置…")
+            self.profile_export_btn.setToolTip("将当前表单导出为 build profile JSON。")
             self.script_load_btn = QtWidgets.QPushButton("从文件加载…")
             self.script_load_btn.setToolTip("将 UTF-8 文本或 JSON 读入下方编辑区；Build 时若下方非空则覆盖 PPT 备注。")
+            script_btn_row.addWidget(self.profile_import_btn)
+            script_btn_row.addWidget(self.profile_export_btn)
             script_btn_row.addWidget(self.script_load_btn)
             script_btn_row.addStretch(1)
             script_outer.addLayout(script_btn_row)
@@ -791,6 +820,8 @@ def _build_ui(QtWidgets, QtCore):
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
             self.subtitle_y_ratio_enable.toggled.connect(self.subtitle_y_ratio_spin.setEnabled)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
+            self.profile_import_btn.clicked.connect(self._import_build_profile)
+            self.profile_export_btn.clicked.connect(self._export_build_profile)
             self.script_load_btn.clicked.connect(self._load_script_file)
 
             self._restore_gui_state_from_config()
@@ -830,6 +861,18 @@ def _build_ui(QtWidgets, QtCore):
             idx_ratio = self.ratio_combo.findData(ratio)
             if idx_ratio >= 0:
                 self.ratio_combo.setCurrentIndex(idx_ratio)
+            resolution = _get_str("resolution", "1080p").strip() or "1080p"
+            idx_resolution = self.resolution_combo.findData(resolution)
+            if idx_resolution >= 0:
+                self.resolution_combo.setCurrentIndex(idx_resolution)
+            try:
+                self.fps_spin.setValue(int(st.get("fps", self.fps_spin.value())))
+            except Exception:
+                pass
+            quality = _get_str("quality", "standard").strip() or "standard"
+            idx_quality = self.quality_combo.findData(quality)
+            if idx_quality >= 0:
+                self.quality_combo.setCurrentIndex(idx_quality)
 
             self.script_edit.setPlainText(_get_str("narration_script", ""))
 
@@ -940,6 +983,9 @@ def _build_ui(QtWidgets, QtCore):
                     "out_dir": self.out_edit.text().strip(),
                     "pages": self.pages_edit.text().strip() or "all",
                     "ratio": str(self.ratio_combo.currentData() or "16:9"),
+                    "resolution": str(self.resolution_combo.currentData() or "1080p"),
+                    "fps": int(self.fps_spin.value()),
+                    "quality": str(self.quality_combo.currentData() or "standard"),
                     "narration_script": self.script_edit.toPlainText(),
                     "voice_id": self._current_voice_id(),
                     "tts_rate": float(self.tts_rate_spin.value()),
@@ -1542,11 +1588,14 @@ def _build_ui(QtWidgets, QtCore):
                 return
             self.script_edit.setPlainText(text)
 
-        def _validate(self) -> JobConfig:
+        def _collect_job_config(self, *, validate_paths: bool) -> JobConfig:
             pptx = Path(self.pptx_edit.text().strip().strip('"'))
             out_dir = Path(self.out_edit.text().strip().strip('"'))
             pages = self.pages_edit.text().strip() or "all"
             ratio = str(self.ratio_combo.currentData() or "16:9").strip() or "16:9"
+            resolution = str(self.resolution_combo.currentData() or "1080p").strip() or "1080p"
+            fps = int(self.fps_spin.value())
+            quality = str(self.quality_combo.currentData() or "standard").strip() or "standard"
             tts_provider = "edge"
             voice_id = self._current_voice_id()
             tts_rate = float(self.tts_rate_spin.value())
@@ -1569,11 +1618,12 @@ def _build_ui(QtWidgets, QtCore):
             bgm_fade_out_s = float(self.bgm_fade_out_spin.value())
             script_text = self.script_edit.toPlainText()
 
-            if not pptx.exists() or pptx.suffix.lower() != ".pptx":
-                if pptx.suffix.lower() != ".pdf":
-                    raise ValueError("请选择有效的 .pptx 或 .pdf 文件。")
-            if not out_dir:
-                raise ValueError("请选择输出目录。")
+            if validate_paths:
+                if not pptx.exists() or pptx.suffix.lower() != ".pptx":
+                    if pptx.suffix.lower() != ".pdf":
+                        raise ValueError("请选择有效的 .pptx 或 .pdf 文件。")
+                if not out_dir:
+                    raise ValueError("请选择输出目录。")
 
             return JobConfig(
                 mode="extract",
@@ -1581,6 +1631,9 @@ def _build_ui(QtWidgets, QtCore):
                 out_dir=out_dir,
                 pages=pages,
                 ratio=ratio,
+                resolution=resolution,
+                fps=fps,
+                quality=quality,
                 tts_provider=tts_provider,
                 voice_id=voice_id,
                 tts_rate=tts_rate,
@@ -1603,6 +1656,90 @@ def _build_ui(QtWidgets, QtCore):
                 script_text=script_text,
             )
 
+        def _apply_job_config(self, config: JobConfig) -> None:
+            self.pptx_edit.setText(str(config.pptx_path) if str(config.pptx_path) != "." else "")
+            self.out_edit.setText(str(config.out_dir))
+            self.pages_edit.setText(str(config.pages or "all"))
+            idx_ratio = self.ratio_combo.findData(str(config.ratio or "16:9"))
+            if idx_ratio >= 0:
+                self.ratio_combo.setCurrentIndex(idx_ratio)
+            idx_resolution = self.resolution_combo.findData(str(config.resolution or "1080p"))
+            if idx_resolution >= 0:
+                self.resolution_combo.setCurrentIndex(idx_resolution)
+            self.fps_spin.setValue(int(config.fps or 30))
+            idx_quality = self.quality_combo.findData(str(config.quality or "standard"))
+            if idx_quality >= 0:
+                self.quality_combo.setCurrentIndex(idx_quality)
+            self.voice_combo.setCurrentText(str(config.voice_id or ""))
+            self.tts_rate_spin.setValue(float(config.tts_rate))
+            self.script_edit.setPlainText(config.script_text or "")
+            self._set_subtitle_color(config.subtitle_color)
+            self.subtitle_fade_in_spin.setValue(int(config.subtitle_fade_in_ms or 80))
+            self.subtitle_fade_out_spin.setValue(int(config.subtitle_fade_out_ms or 120))
+            self.subtitle_scale_from_spin.setValue(int(config.subtitle_scale_from or 100))
+            self.subtitle_scale_to_spin.setValue(int(config.subtitle_scale_to or 104))
+            self.subtitle_outline_spin.setValue(int(config.subtitle_outline or 1))
+            self.subtitle_shadow_spin.setValue(int(config.subtitle_shadow or 0))
+            if config.subtitle_font:
+                idx_font = self.subtitle_font_edit.findText(str(config.subtitle_font))
+                if idx_font >= 0:
+                    self.subtitle_font_edit.setCurrentIndex(idx_font)
+                else:
+                    self.subtitle_font_edit.setCurrentText(str(config.subtitle_font))
+            self.subtitle_size_spin.setValue(int(config.subtitle_size or 48))
+            enabled = config.subtitle_y_ratio is not None
+            self.subtitle_y_ratio_enable.setChecked(enabled)
+            if enabled:
+                self.subtitle_y_ratio_spin.setValue(float(config.subtitle_y_ratio))
+            self.bgm_path_edit.setText(str(config.bgm_path or ""))
+            self.bgm_volume_spin.setValue(float(config.bgm_volume))
+            self.narration_volume_spin.setValue(float(config.narration_volume))
+            self.bgm_fade_in_spin.setValue(float(config.bgm_fade_in_s))
+            self.bgm_fade_out_spin.setValue(float(config.bgm_fade_out_s))
+
+        def _import_build_profile(self) -> None:
+            QtWidgets = self._QtWidgets
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "导入 build 配置",
+                self.out_edit.text().strip() or str(Path.cwd()),
+                "Build Profile (*.json);;JSON (*.json);;All files (*)",
+            )
+            if not path:
+                return
+            try:
+                profile = load_build_profile(path)
+                config = _job_config_from_build_profile(profile, profile_path=path)
+                self._apply_job_config(config)
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "导入失败", str(exc))
+                return
+            self._append_log(f"已导入 build 配置：{path}")
+
+        def _export_build_profile(self) -> None:
+            QtWidgets = self._QtWidgets
+            current = self._collect_job_config(validate_paths=False)
+            default_path = str((Path(self.out_edit.text().strip() or str(Path.cwd())) / "build_profile.json").resolve())
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                self,
+                "导出 build 配置",
+                default_path,
+                "Build Profile (*.json);;JSON (*.json)",
+            )
+            if not path:
+                return
+            if not path.lower().endswith(".json"):
+                path += ".json"
+            try:
+                save_build_profile(path, _job_config_to_build_profile(current))
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(self, "导出失败", str(exc))
+                return
+            self._append_log(f"已导出 build 配置：{path}")
+
+        def _validate(self) -> JobConfig:
+            return self._collect_job_config(validate_paths=True)
+
         def _set_running(self, running: bool) -> None:
             self.extract_btn.setEnabled(not running)
             self.build_btn.setEnabled(not running)
@@ -1611,8 +1748,13 @@ def _build_ui(QtWidgets, QtCore):
             self.voice_combo.setEnabled(not running)
             self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
+            self.resolution_combo.setEnabled(not running)
+            self.fps_spin.setEnabled(not running)
+            self.quality_combo.setEnabled(not running)
             self.script_edit.setReadOnly(running)
             self.script_load_btn.setEnabled(not running)
+            self.profile_import_btn.setEnabled(not running)
+            self.profile_export_btn.setEnabled(not running)
             self.progress.setEnabled(True)
             if not running:
                 # Keep the last progress visible; mark idle explicitly.
@@ -1672,6 +1814,9 @@ def _build_ui(QtWidgets, QtCore):
                     voice_id=config.voice_id,
                     tts_rate=config.tts_rate,
                     ratio=config.ratio,
+                    resolution=config.resolution,
+                    fps=config.fps,
+                    quality=config.quality,
                     script_text=config.script_text,
                     script_temp_path=None,
                     minimax_base_url=config.minimax_base_url,
