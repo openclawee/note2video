@@ -651,6 +651,10 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
 
     fake_pythoncom = SimpleNamespace(CoInitialize=lambda: None, CoUninitialize=lambda: None)
     fake_client = SimpleNamespace(DispatchEx=lambda _name: FakeApp())
+    fake_win32gui = SimpleNamespace(
+        FindWindow=lambda *_args, **_kwargs: 0,
+        SetWindowPos=lambda *_args, **_kwargs: None,
+    )
     monkeypatch.setitem(__import__("sys").modules, "pythoncom", fake_pythoncom)
     monkeypatch.setitem(
         __import__("sys").modules,
@@ -658,6 +662,7 @@ def test_powerpoint_export_uses_absolute_image_path(tmp_path, monkeypatch) -> No
         SimpleNamespace(client=fake_client),
     )
     monkeypatch.setitem(__import__("sys").modules, "win32com.client", fake_client)
+    monkeypatch.setitem(__import__("sys").modules, "win32gui", fake_win32gui)
 
     input_file = tmp_path / "demo.pptx"
     input_file.write_bytes(b"placeholder")
