@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-_SENTENCE_END_PUNCT = {"。", "！", "？", "!", "?", "；", ";", "."}
+_SENTENCE_END_PUNCT = {"。", "！", "？", "!", "?", "；", ";", ".", "，", ",", "：", ":"}
 _PAUSE_AFTER_PUNCT: dict[str, int] = {
     "。": 420,
     "！": 420,
@@ -13,6 +13,10 @@ _PAUSE_AFTER_PUNCT: dict[str, int] = {
     "?": 380,
     "；": 320,
     ";": 320,
+    "，": 240,
+    ",": 240,
+    "：": 280,
+    ":": 280,
 }
 
 

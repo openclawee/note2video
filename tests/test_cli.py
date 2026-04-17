@@ -151,9 +151,13 @@ def test_subtitle_command_generates_srt_and_json(tmp_path) -> None:
     )
     manifest = json.loads((project_dir / "manifest.json").read_text(encoding="utf-8"))
 
-    assert "第一句。" in srt_text
-    assert "第二句！" in srt_text
+    assert "第一句。" not in srt_text
+    assert "第二句！" not in srt_text
+    assert "第一句" in srt_text
+    assert "第二句" in srt_text
     assert subtitle_json["segments"][0]["page"] == 1
+    assert subtitle_json["segments"][0]["text"] == "第一句"
+    assert subtitle_json["segments"][1]["text"] == "第二句"
     assert manifest["outputs"]["subtitle"] == "subtitles/subtitles.srt"
     assert manifest["outputs"]["subtitle_json"] == "subtitles/subtitles.json"
 
@@ -203,6 +207,8 @@ def test_subtitle_prefers_voice_timings(tmp_path) -> None:
     subtitle_json = json.loads((project_dir / "subtitles" / "subtitles.json").read_text(encoding="utf-8"))
     assert subtitle_json["segments"][0]["start_ms"] == 0
     assert subtitle_json["segments"][1]["start_ms"] == 700
+    assert subtitle_json["segments"][0]["text"] == "第一句"
+    assert subtitle_json["segments"][1]["text"] == "第二句"
 
 
 def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:

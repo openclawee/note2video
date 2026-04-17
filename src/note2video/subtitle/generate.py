@@ -8,6 +8,8 @@ from typing import Any
 from note2video.subtitle.ass import build_ass
 from note2video.text_segmentation import split_sentences
 
+_TRAILING_DISPLAY_PUNCT = "。！？!?；;：:，,、.…"
+
 
 class SubtitleGenerationError(RuntimeError):
     """Raised when subtitle generation fails."""
@@ -158,7 +160,7 @@ def _build_segments(
         sentence_start = cursor_ms
         for sentence, duration in zip(sentences, segment_durations):
             sentence_end = sentence_start + duration
-            sentence = _wrap_subtitle_text(sentence)
+            sentence = _to_display_subtitle_text(sentence)
             segments.append(
                 SubtitleSegment(
                     index=index,
@@ -182,7 +184,7 @@ def _build_segments_from_timings(
     segments: list[SubtitleSegment] = []
     for item in timing_segments:
         page = int(item["page"])
-        text = _wrap_subtitle_text(str(item.get("text", "")))
+        text = _to_display_subtitle_text(str(item.get("text", "")))
         segments.append(
             SubtitleSegment(
                 index=int(item["index"]),
@@ -197,6 +199,17 @@ def _build_segments_from_timings(
 
 def _split_sentences(text: str) -> list[str]:
     return split_sentences(text)
+
+
+def _to_display_subtitle_text(text: str) -> str:
+    return _strip_trailing_display_punct(_wrap_subtitle_text(text))
+
+
+def _strip_trailing_display_punct(text: str) -> str:
+    t = (text or "").rstrip()
+    while t and t[-1] in _TRAILING_DISPLAY_PUNCT:
+        t = t[:-1].rstrip()
+    return t
 
 
 def _wrap_subtitle_text(text: str, *, max_chars_per_line: int = 18, max_lines: int = 4) -> str:
