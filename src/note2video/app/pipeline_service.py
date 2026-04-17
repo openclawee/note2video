@@ -17,6 +17,9 @@ class BuildRequest:
     out_dir: str
     pages: str = "all"
     ratio: str = "16:9"
+    resolution: str = "1080p"
+    fps: int = 30
+    quality: str = "standard"
     tts_provider: str = "pyttsx3"
     voice_id: str = ""
     tts_rate: float = 1.0
@@ -72,6 +75,9 @@ class RenderRequest:
     project_dir: str
     output_path: str | None = None
     ratio: str = "16:9"
+    resolution: str = "1080p"
+    fps: int = 30
+    quality: str = "standard"
     bgm_path: str | None = None
     bgm_volume: float = 0.18
     bgm_fade_in_s: float = 0.0
@@ -178,6 +184,9 @@ def run_build_pipeline(
     subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
     render_kwargs = {
         "ratio": request.ratio,
+        "resolution": request.resolution,
+        "fps": int(request.fps),
+        "quality": request.quality,
         "bgm_path": request.bgm_path,
         "bgm_volume": float(request.bgm_volume),
         "bgm_fade_in_s": float(request.bgm_fade_in_s),
@@ -441,6 +450,9 @@ def run_render_pipeline(
         request.project_dir,
         request.output_path,
         ratio=request.ratio,
+        resolution=request.resolution,
+        fps=int(request.fps),
+        quality=request.quality,
         bgm_path=request.bgm_path,
         bgm_volume=float(request.bgm_volume),
         bgm_fade_in_s=float(request.bgm_fade_in_s),

@@ -19,6 +19,13 @@ from note2video.app.pipeline_service import (
     run_voice_pipeline,
     run_voices_pipeline,
 )
+from note2video.build_profile import (
+    build_profile_to_request_kwargs,
+    default_build_request_kwargs,
+    load_build_profile,
+    request_kwargs_to_build_profile,
+    save_build_profile,
+)
 from note2video.parser.extract import PowerPointUnavailableError, extract_project
 from note2video.render.video import RenderError, render_video
 from note2video.subtitle.generate import SubtitleGenerationError, generate_subtitles
@@ -40,94 +47,148 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_cmd = subparsers.add_parser("build", help="Run the full pipeline.")
-    _add_common_arguments(build_cmd)
-    build_cmd.add_argument("input", help="Path to the input .pptx file.")
-    build_cmd.add_argument("--ratio", default="16:9", help="Output ratio.")
-    build_cmd.add_argument("--pages", default="all", help="Page selection, e.g. 1-3,5.")
+    _add_common_arguments(build_cmd, suppress_defaults=True)
+    build_cmd.add_argument(
+        "input",
+        nargs="?",
+        default=argparse.SUPPRESS,
+        help="Path to the input .pptx file. Optional when --config provides input.file.",
+    )
+    build_cmd.add_argument(
+        "--build-config",
+        "--config",
+        dest="build_config",
+        default="",
+        help="Build profile JSON path. CLI arguments override profile values.",
+    )
+    build_cmd.add_argument(
+        "--save-config",
+        default="",
+        help="Write the effective build profile JSON to this path before running.",
+    )
+    build_cmd.add_argument("--ratio", default=argparse.SUPPRESS, help="Output ratio.")
+    build_cmd.add_argument(
+        "--resolution",
+        choices=["720p", "1080p", "1440p"],
+        default=argparse.SUPPRESS,
+        help="Output resolution preset.",
+    )
+    build_cmd.add_argument(
+        "--fps",
+        type=int,
+        default=argparse.SUPPRESS,
+        help="Output frame rate (e.g. 24, 30, 60).",
+    )
+    build_cmd.add_argument(
+        "--quality",
+        choices=["standard", "high"],
+        default=argparse.SUPPRESS,
+        help="Video encoding quality preset.",
+    )
+    build_cmd.add_argument("--pages", default=argparse.SUPPRESS, help="Page selection, e.g. 1-3,5.")
     build_cmd.add_argument(
         "--script-file",
-        default="",
+        default=argparse.SUPPRESS,
         help="Optional script file to override PPT notes. Supports script.json or scripts/all.txt format.",
     )
     build_cmd.add_argument(
         "--script-text",
-        default="",
+        default=argparse.SUPPRESS,
         help="Optional inline script text to override PPT notes (use quotes).",
     )
-    build_cmd.add_argument("--voice", default="", help="Voice ID placeholder.")
-    build_cmd.add_argument("--tts-provider", default="", help="TTS provider placeholder.")
+    build_cmd.add_argument("--voice", default=argparse.SUPPRESS, help="Voice ID placeholder.")
+    build_cmd.add_argument("--tts-provider", default=argparse.SUPPRESS, help="TTS provider placeholder.")
     build_cmd.add_argument(
         "--tts-rate",
         type=float,
-        default=1.0,
+        default=argparse.SUPPRESS,
         help="Speech rate multiplier (0.5–2.0); applied during TTS so subtitles stay aligned.",
     )
-    build_cmd.add_argument("--bgm", default="", help="Optional background music file to mix into the final video.")
-    build_cmd.add_argument("--bgm-volume", type=float, default=0.18, help="Background music volume (default 0.18).")
-    build_cmd.add_argument("--bgm-fade-in", type=float, default=0.0, help="BGM fade-in seconds (default 0).")
-    build_cmd.add_argument("--bgm-fade-out", type=float, default=0.0, help="BGM fade-out seconds (default 0).")
+    build_cmd.add_argument(
+        "--bgm",
+        default=argparse.SUPPRESS,
+        help="Optional background music file to mix into the final video.",
+    )
+    build_cmd.add_argument(
+        "--bgm-volume",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Background music volume (default 0.18).",
+    )
+    build_cmd.add_argument(
+        "--bgm-fade-in",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="BGM fade-in seconds (default 0).",
+    )
+    build_cmd.add_argument(
+        "--bgm-fade-out",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="BGM fade-out seconds (default 0).",
+    )
     build_cmd.add_argument(
         "--narration-volume",
         type=float,
-        default=1.0,
+        default=argparse.SUPPRESS,
         help="Narration volume before mixing (default 1.0).",
     )
     build_cmd.add_argument(
         "--subtitle-color",
-        default="",
+        default=argparse.SUPPRESS,
         help="Subtitle color when burning into video (hex #RRGGBB). Example: #FFFFFF",
     )
     build_cmd.add_argument(
         "--subtitle-font",
-        default="",
+        default=argparse.SUPPRESS,
         help="Subtitle font family name when burning into video (e.g. Microsoft YaHei).",
     )
     build_cmd.add_argument(
         "--subtitle-size",
         type=int,
-        default=0,
+        default=argparse.SUPPRESS,
         help="Subtitle font size in pixels when burning into video (0 = default).",
     )
     build_cmd.add_argument(
         "--subtitle-fade-in-ms",
         type=int,
-        default=80,
+        default=argparse.SUPPRESS,
         help="ASS fade-in duration per sentence (ms).",
     )
     build_cmd.add_argument(
         "--subtitle-fade-out-ms",
         type=int,
-        default=120,
+        default=argparse.SUPPRESS,
         help="ASS fade-out duration per sentence (ms).",
     )
     build_cmd.add_argument(
         "--subtitle-scale-from",
         type=int,
-        default=100,
+        default=argparse.SUPPRESS,
         help="ASS scale at sentence start (percent).",
     )
     build_cmd.add_argument(
         "--subtitle-scale-to",
         type=int,
-        default=104,
+        default=argparse.SUPPRESS,
         help="ASS scale after short ease-in (percent).",
     )
     build_cmd.add_argument(
         "--subtitle-outline",
         type=int,
-        default=1,
+        default=argparse.SUPPRESS,
         help="ASS outline thickness (0+).",
     )
     build_cmd.add_argument(
         "--subtitle-shadow",
         type=int,
-        default=0,
+        default=argparse.SUPPRESS,
         help="ASS shadow depth (0+).",
     )
     build_cmd.add_argument(
         "--subtitle-y-ratio",
         type=float,
-        default=None,
+        default=argparse.SUPPRESS,
         help="Optional subtitle vertical position ratio (0-1). Uses ASS \\pos() with horizontal center.",
     )
     # MiniMax CN/Global are separate providers; host selection is implied by --tts-provider.
@@ -190,6 +251,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_arguments(render_cmd)
     render_cmd.add_argument("input", help="Path to the prepared work directory.")
     render_cmd.add_argument("--ratio", default="16:9", help="Output ratio (16:9, 9:16, 1:1).")
+    render_cmd.add_argument(
+        "--resolution",
+        default="1080p",
+        choices=["720p", "1080p", "1440p"],
+        help="Output resolution preset.",
+    )
+    render_cmd.add_argument("--fps", type=int, default=30, help="Output frame rate.")
+    render_cmd.add_argument(
+        "--quality",
+        default="standard",
+        choices=["standard", "high"],
+        help="Video encoding quality preset.",
+    )
     render_cmd.add_argument("--bgm", default="", help="Optional background music file to mix into the final video.")
     render_cmd.add_argument("--bgm-volume", type=float, default=0.18, help="Background music volume (default 0.18).")
     render_cmd.add_argument("--bgm-fade-in", type=float, default=0.0, help="BGM fade-in seconds (default 0).")
@@ -263,8 +337,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_common_arguments(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--out", default="./dist", help="Output directory.")
+def _add_common_arguments(command: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
+    out_default = argparse.SUPPRESS if suppress_defaults else "./dist"
+    command.add_argument("--out", default=out_default, help="Output directory.")
     command.add_argument(
         "--json",
         action="store_true",
@@ -273,34 +348,92 @@ def _add_common_arguments(command: argparse.ArgumentParser) -> None:
     )
 
 
-def handle_build(args: argparse.Namespace) -> int:
-    result = run_build_pipeline(
-        BuildRequest(
-            input_file=args.input,
-            out_dir=args.out,
-            pages=args.pages,
-            ratio=args.ratio,
-            tts_provider=(args.tts_provider or "pyttsx3"),
-            voice_id=args.voice,
-            tts_rate=float(args.tts_rate),
-            script_file=(args.script_file.strip() or None),
-            script_text=(args.script_text if str(args.script_text or "").strip() else None),
-            bgm_path=(args.bgm.strip() or None),
-            bgm_volume=float(args.bgm_volume),
-            bgm_fade_in_s=float(args.bgm_fade_in),
-            bgm_fade_out_s=float(args.bgm_fade_out),
-            narration_volume=float(args.narration_volume),
-            subtitle_color=(args.subtitle_color.strip() or None),
-            subtitle_fade_in_ms=int(args.subtitle_fade_in_ms),
-            subtitle_fade_out_ms=int(args.subtitle_fade_out_ms),
-            subtitle_scale_from=int(args.subtitle_scale_from),
-            subtitle_scale_to=int(args.subtitle_scale_to),
-            subtitle_outline=int(args.subtitle_outline),
-            subtitle_shadow=int(args.subtitle_shadow),
-            subtitle_font=(args.subtitle_font.strip() or None),
-            subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
-            subtitle_y_ratio=(float(args.subtitle_y_ratio) if args.subtitle_y_ratio is not None else None),
+def _build_request_from_args(args: argparse.Namespace) -> BuildRequest:
+    merged = default_build_request_kwargs()
+    build_config = str(getattr(args, "build_config", "") or "").strip()
+    if build_config:
+        merged.update(build_profile_to_request_kwargs(load_build_profile(build_config), profile_path=build_config))
+
+    ns = vars(args)
+    explicit_map = {
+        "input": "input_file",
+        "out": "out_dir",
+        "pages": "pages",
+        "ratio": "ratio",
+        "resolution": "resolution",
+        "fps": "fps",
+        "quality": "quality",
+        "tts_provider": "tts_provider",
+        "voice": "voice_id",
+        "tts_rate": "tts_rate",
+        "script_file": "script_file",
+        "script_text": "script_text",
+        "bgm": "bgm_path",
+        "bgm_volume": "bgm_volume",
+        "bgm_fade_in": "bgm_fade_in_s",
+        "bgm_fade_out": "bgm_fade_out_s",
+        "narration_volume": "narration_volume",
+        "subtitle_color": "subtitle_color",
+        "subtitle_font": "subtitle_font",
+        "subtitle_size": "subtitle_size",
+        "subtitle_fade_in_ms": "subtitle_fade_in_ms",
+        "subtitle_fade_out_ms": "subtitle_fade_out_ms",
+        "subtitle_scale_from": "subtitle_scale_from",
+        "subtitle_scale_to": "subtitle_scale_to",
+        "subtitle_outline": "subtitle_outline",
+        "subtitle_shadow": "subtitle_shadow",
+        "subtitle_y_ratio": "subtitle_y_ratio",
+    }
+    for arg_name, target_name in explicit_map.items():
+        if arg_name in ns:
+            merged[target_name] = ns[arg_name]
+
+    input_file = str(merged.get("input_file") or "").strip()
+    if not input_file:
+        raise ValueError("Missing input file. Provide INPUT or set input.file in --config.")
+
+    request = BuildRequest(
+        input_file=input_file,
+        out_dir=str(merged.get("out_dir") or "./dist"),
+        pages=str(merged.get("pages") or "all"),
+        ratio=str(merged.get("ratio") or "16:9"),
+        resolution=str(merged.get("resolution") or "1080p"),
+        fps=int(merged.get("fps") or 30),
+        quality=str(merged.get("quality") or "standard"),
+        tts_provider=str(merged.get("tts_provider") or "pyttsx3"),
+        voice_id=str(merged.get("voice_id") or ""),
+        tts_rate=float(merged.get("tts_rate") or 1.0),
+        script_file=(str(merged.get("script_file") or "").strip() or None),
+        script_text=(str(merged.get("script_text")) if str(merged.get("script_text") or "").strip() else None),
+        bgm_path=(str(merged.get("bgm_path") or "").strip() or None),
+        bgm_volume=float(merged.get("bgm_volume") or 0.18),
+        bgm_fade_in_s=float(merged.get("bgm_fade_in_s") or 0.0),
+        bgm_fade_out_s=float(merged.get("bgm_fade_out_s") or 0.0),
+        narration_volume=float(merged.get("narration_volume") or 1.0),
+        subtitle_color=(str(merged.get("subtitle_color") or "").strip() or None),
+        subtitle_fade_in_ms=int(merged.get("subtitle_fade_in_ms") or 80),
+        subtitle_fade_out_ms=int(merged.get("subtitle_fade_out_ms") or 120),
+        subtitle_scale_from=int(merged.get("subtitle_scale_from") or 100),
+        subtitle_scale_to=int(merged.get("subtitle_scale_to") or 104),
+        subtitle_outline=int(merged.get("subtitle_outline") or 1),
+        subtitle_shadow=int(merged.get("subtitle_shadow") or 0),
+        subtitle_font=(str(merged.get("subtitle_font") or "").strip() or None),
+        subtitle_size=(int(merged.get("subtitle_size") or 0) if int(merged.get("subtitle_size") or 0) > 0 else None),
+        subtitle_y_ratio=(
+            float(merged.get("subtitle_y_ratio")) if merged.get("subtitle_y_ratio") is not None else None
         ),
+    )
+
+    save_config = str(getattr(args, "save_config", "") or "").strip()
+    if save_config:
+        save_build_profile(save_config, request_kwargs_to_build_profile(dict(request.__dict__)))
+    return request
+
+
+def handle_build(args: argparse.Namespace) -> int:
+    request = _build_request_from_args(args)
+    result = run_build_pipeline(
+        request,
         extract_project_fn=extract_project,
         generate_voice_assets_fn=generate_voice_assets,
         generate_subtitles_fn=generate_subtitles,
@@ -312,7 +445,7 @@ def handle_build(args: argparse.Namespace) -> int:
         "command": "build",
         "status": "ok",
         "phase": "complete",
-        "input": args.input,
+        "input": request.input_file,
         "output_dir": str(out_dir),
         "artifacts": result["artifacts"],
         "slide_count": result["slide_count"],
@@ -438,6 +571,9 @@ def handle_render(args: argparse.Namespace) -> int:
             project_dir=args.input,
             output_path=(args.out if args.out != "./dist" else None),
             ratio=args.ratio,
+            resolution=args.resolution,
+            fps=int(args.fps),
+            quality=args.quality,
             bgm_path=(args.bgm.strip() or None),
             bgm_volume=float(args.bgm_volume),
             bgm_fade_in_s=float(args.bgm_fade_in),
