@@ -14,6 +14,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
+from note2video.text_segmentation import split_sentences, split_sentences_with_pauses
 from note2video.user_config import load_user_config, normalize_user_config, tts_provider_config
 
 
@@ -1013,62 +1014,11 @@ def _http_post_sse_collect_audio_bytes(
 
 
 def _split_sentences(text: str) -> list[str]:
-    normalized = text.replace("\r", "\n").strip()
-    if not normalized:
-        return []
-    raw_parts = re.split(r"(?<=[。！？!?；;])|\n+", normalized)
-    return [part.strip() for part in raw_parts if part and part.strip()]
+    return split_sentences(text)
 
 
 def _split_sentences_with_pauses(text: str) -> list[tuple[str, int]]:
-    """
-    Split text into sentence-like chunks while also emitting a suggested pause (ms)
-    after each chunk based on ending punctuation or line breaks.
-    """
-    normalized = (text or "").replace("\r", "\n").strip()
-    if not normalized:
-        return []
-
-    # Pause rules (ms). Keep them short so speech stays natural.
-    PAUSE_AFTER_PUNCT: dict[str, int] = {
-        "。": 420,
-        "！": 420,
-        "？": 420,
-        "!": 380,
-        "?": 380,
-        "；": 320,
-        ";": 320,
-    }
-    PAUSE_AFTER_NEWLINE = 380
-
-    out: list[tuple[str, int]] = []
-    buf: list[str] = []
-
-    def flush(pause_ms: int) -> None:
-        s = "".join(buf).strip()
-        buf.clear()
-        if not s:
-            return
-        out.append((s, max(0, int(pause_ms))))
-
-    i = 0
-    n = len(normalized)
-    while i < n:
-        ch = normalized[i]
-        if ch == "\n":
-            # Consume consecutive newlines as a single break.
-            while i < n and normalized[i] == "\n":
-                i += 1
-            flush(PAUSE_AFTER_NEWLINE)
-            continue
-
-        buf.append(ch)
-        if ch in PAUSE_AFTER_PUNCT:
-            flush(PAUSE_AFTER_PUNCT[ch])
-        i += 1
-
-    flush(0)
-    return out
+    return split_sentences_with_pauses(text)
 
 
 def _read_wav_duration_ms(path: Path) -> int:

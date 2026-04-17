@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from note2video.subtitle.ass import build_ass
+from note2video.text_segmentation import split_sentences
 
 
 class SubtitleGenerationError(RuntimeError):
@@ -196,13 +196,7 @@ def _build_segments_from_timings(
 
 
 def _split_sentences(text: str) -> list[str]:
-    normalized = text.replace("\r", "\n").strip()
-    if not normalized:
-        return []
-
-    raw_parts = re.split(r"(?<=[。！？!?；;])|\n+", normalized)
-    parts = [part.strip() for part in raw_parts if part and part.strip()]
-    return parts
+    return split_sentences(text)
 
 
 def _wrap_subtitle_text(text: str, *, max_chars_per_line: int = 18, max_lines: int = 4) -> str:
