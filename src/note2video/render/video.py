@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from note2video.subtitle.ass import build_ass
+from note2video.subtitle.wrap import wrap_subtitle_text
 
 
 class RenderError(RuntimeError):
@@ -90,52 +91,6 @@ def _wrap_config_from_subtitle_size(subtitle_size: int | None) -> tuple[int, int
     return est, 4
 
 
-def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int) -> str:
-    t = (text or "").replace("\r", "\n").strip()
-    if not t:
-        return ""
-    # Preserve explicit newlines from upstream.
-    if "\n" in t:
-        return "\n".join(line.strip() for line in t.splitlines() if line.strip())
-    if max_chars_per_line <= 0 or max_lines <= 1:
-        return t
-    if len(t) <= max_chars_per_line:
-        return t
-
-    preferred_breaks = "，,、：:；;。！？!?"
-    target = min(len(t) - 1, max_chars_per_line)
-    best = -1
-    best_score = 10**9
-    for i, ch in enumerate(t[:-1], start=1):
-        if ch not in preferred_breaks and ch != " ":
-            continue
-        score = abs(i - target)
-        if score < best_score:
-            best = i
-            best_score = score
-    if best <= 0:
-        best = max_chars_per_line
-
-    first = t[:best].rstrip()
-    second = t[best:].lstrip()
-    if not second:
-        return first
-    if max_lines == 2:
-        return first + "\n" + second
-
-    lines: list[str] = [first]
-    rest = second
-    while rest and len(lines) < max_lines:
-        if len(rest) <= max_chars_per_line:
-            lines.append(rest)
-            rest = ""
-            break
-        lines.append(rest[:max_chars_per_line].rstrip())
-        rest = rest[max_chars_per_line:].lstrip()
-    # If `rest` is still not empty here, we simply drop it (no ellipsis) to avoid truncation markers.
-    return "\n".join(lines)
-
-
 def _load_subtitle_segments_wrapped(
     *,
     subtitle_json_path: Path,
@@ -151,7 +106,7 @@ def _load_subtitle_segments_wrapped(
         if not isinstance(seg, dict):
             continue
         seg2 = dict(seg)
-        seg2["text"] = _wrap_subtitle_text(
+        seg2["text"] = wrap_subtitle_text(
             str(seg2.get("text", "") or ""),
             max_chars_per_line=max_chars,
             max_lines=max_lines,

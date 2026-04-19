@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from note2video.subtitle.ass import build_ass
+from note2video.subtitle.wrap import wrap_subtitle_text
 from note2video.text_segmentation import split_sentences
 
 _TRAILING_DISPLAY_PUNCT = "。！？!?；;：:，,、.…"
@@ -202,7 +203,7 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _to_display_subtitle_text(text: str) -> str:
-    return _strip_trailing_display_punct(_wrap_subtitle_text(text))
+    return _strip_trailing_display_punct(wrap_subtitle_text(text))
 
 
 def _strip_trailing_display_punct(text: str) -> str:
@@ -210,64 +211,6 @@ def _strip_trailing_display_punct(text: str) -> str:
     while t and t[-1] in _TRAILING_DISPLAY_PUNCT:
         t = t[:-1].rstrip()
     return t
-
-
-def _wrap_subtitle_text(text: str, *, max_chars_per_line: int = 18, max_lines: int = 4) -> str:
-    """
-    Wrap a subtitle sentence into at most `max_lines` lines.
-
-    We use a simple character-count heuristic so it works for both CJK and English
-    without relying on font metrics. This is tuned for 1080p output.
-    """
-    t = (text or "").replace("\r", "\n").strip()
-    if not t:
-        return ""
-    # Preserve explicit newlines from upstream.
-    if "\n" in t:
-        return "\n".join(line.strip() for line in t.splitlines() if line.strip())
-    if max_chars_per_line <= 0 or max_lines <= 1:
-        return t
-    if len(t) <= max_chars_per_line:
-        return t
-
-    # Prefer splitting near the middle using punctuation / spaces.
-    preferred_breaks = "，,、：:；;。！？!?"
-    target = min(len(t) - 1, max_chars_per_line)
-    best = -1
-    best_score = 10**9
-    for i, ch in enumerate(t[:-1], start=1):
-        if ch not in preferred_breaks and ch != " ":
-            continue
-        # Lower score is better: close to target and not too early.
-        score = abs(i - target)
-        if score < best_score:
-            best = i
-            best_score = score
-
-    if best <= 0:
-        best = max_chars_per_line
-
-    first = t[:best].rstrip()
-    second = t[best:].lstrip()
-    if not second:
-        return first
-
-    if max_lines == 2:
-        # Legacy: keep behavior for explicit max_lines=2 callers (but do not truncate).
-        return first + "\n" + second
-
-    # Generic multi-line wrapping fallback.
-    lines: list[str] = [first]
-    rest = second
-    while rest and len(lines) < max_lines:
-        if len(rest) <= max_chars_per_line:
-            lines.append(rest)
-            rest = ""
-            break
-        lines.append(rest[:max_chars_per_line].rstrip())
-        rest = rest[max_chars_per_line:].lstrip()
-    # If `rest` is still not empty here, we simply drop it (no ellipsis) to avoid truncation markers.
-    return "\n".join(lines)
 
 
 def _allocate_durations(*, total: int, weights: list[int]) -> list[int]:
