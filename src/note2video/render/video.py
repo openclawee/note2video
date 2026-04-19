@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from note2video.subtitle.ass import build_ass
+from note2video.subtitle.wrap import subtitle_wrap_layout_from_canvas, wrap_subtitle_text
 
 
 class RenderError(RuntimeError):
@@ -73,88 +74,50 @@ def _quality_encode_options(value: str | None) -> tuple[str, str]:
     raise RenderError(f"Unsupported quality: {value!r}. Use standard or high.")
 
 
-def _wrap_config_from_subtitle_size(subtitle_size: int | None) -> tuple[int, int]:
-    """
-    Heuristic mapping from font size (1080p) to (max_chars_per_line, max_lines).
-
-    Baseline: 48px font ≈ 18 chars/line (tuned for 1920x1080 with typical margins).
-    """
-    try:
-        size = int(subtitle_size) if subtitle_size is not None else 0
-    except Exception:
-        size = 0
-    if size <= 0:
-        return 18, 4
-    est = int(round(18 * 48 / max(size, 8)))
-    est = max(10, min(30, est))
-    return est, 4
-
-
-def _wrap_subtitle_text(text: str, *, max_chars_per_line: int, max_lines: int) -> str:
-    t = (text or "").replace("\r", "\n").strip()
-    if not t:
-        return ""
-    # Preserve explicit newlines from upstream.
-    if "\n" in t:
-        return "\n".join(line.strip() for line in t.splitlines() if line.strip())
-    if max_chars_per_line <= 0 or max_lines <= 1:
-        return t
-    if len(t) <= max_chars_per_line:
-        return t
-
-    preferred_breaks = "，,、：:；;。！？!?"
-    target = min(len(t) - 1, max_chars_per_line)
-    best = -1
-    best_score = 10**9
-    for i, ch in enumerate(t[:-1], start=1):
-        if ch not in preferred_breaks and ch != " ":
-            continue
-        score = abs(i - target)
-        if score < best_score:
-            best = i
-            best_score = score
-    if best <= 0:
-        best = max_chars_per_line
-
-    first = t[:best].rstrip()
-    second = t[best:].lstrip()
-    if not second:
-        return first
-    if max_lines == 2:
-        return first + "\n" + second
-
-    lines: list[str] = [first]
-    rest = second
-    while rest and len(lines) < max_lines:
-        if len(rest) <= max_chars_per_line:
-            lines.append(rest)
-            rest = ""
-            break
-        lines.append(rest[:max_chars_per_line].rstrip())
-        rest = rest[max_chars_per_line:].lstrip()
-    # If `rest` is still not empty here, we simply drop it (no ellipsis) to avoid truncation markers.
-    return "\n".join(lines)
-
-
 def _load_subtitle_segments_wrapped(
     *,
     subtitle_json_path: Path,
+    canvas_w: int,
+    canvas_h: int,
     subtitle_size: int | None,
+    subtitle_font: str | None,
+    subtitle_outline: int | None,
 ) -> list[dict[str, Any]]:
     payload = json.loads(subtitle_json_path.read_text(encoding="utf-8"))
     base_segments = payload.get("segments") or []
     if not isinstance(base_segments, list):
         return []
-    max_chars, max_lines = _wrap_config_from_subtitle_size(subtitle_size)
+    try:
+        fs = int(subtitle_size) if subtitle_size is not None else 48
+    except Exception:
+        fs = 48
+    fs = max(8, fs)
+    try:
+        outline = int(subtitle_outline) if subtitle_outline is not None else 1
+    except Exception:
+        outline = 1
+    outline = max(0, outline)
+    scale_w = float(canvas_w) / 1920.0
+    margin_lr = max(24, int(round(80 * scale_w)))
+    layout = subtitle_wrap_layout_from_canvas(
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
+        font_size=fs,
+        margin_l=margin_lr,
+        margin_r=margin_lr,
+        outline=outline,
+        max_lines=4,
+    )
+    font = str(subtitle_font or "").strip()
     out: list[dict[str, Any]] = []
     for seg in base_segments:
         if not isinstance(seg, dict):
             continue
         seg2 = dict(seg)
-        seg2["text"] = _wrap_subtitle_text(
+        seg2["text"] = wrap_subtitle_text(
             str(seg2.get("text", "") or ""),
-            max_chars_per_line=max_chars,
-            max_lines=max_lines,
+            layout=layout,
+            font_name=font,
         )
         out.append(seg2)
     return out
@@ -227,6 +190,13 @@ def render_video(
     base_canvas_w, base_canvas_h = _ratio_canvas_size(normalized_ratio)
     canvas_w, canvas_h = _scale_canvas_size(base_canvas_w, base_canvas_h, normalized_resolution)
 
+    try:
+        outline_for_wrap = int(subtitle_outline) if subtitle_outline is not None else int(manifest.get("subtitle_outline", 1) or 1)
+    except Exception:
+        outline_for_wrap = 1
+    outline_for_wrap = max(0, outline_for_wrap)
+    font_for_wrap = (str(subtitle_font).strip() if subtitle_font else "") or str(manifest.get("subtitle_font") or "").strip()
+
     audio_path = root / manifest.get("outputs", {}).get("merged_audio", "audio/merged.wav")
     if not audio_path.exists():
         raise RenderError("Merged audio file is missing. Run 'voice' first.")
@@ -264,7 +234,11 @@ def render_video(
     if subtitle_json_path.exists():
         wrapped_segments = _load_subtitle_segments_wrapped(
             subtitle_json_path=subtitle_json_path,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
             subtitle_size=subtitle_size,
+            subtitle_font=font_for_wrap or None,
+            subtitle_outline=outline_for_wrap,
         )
         if wrapped_segments:
             subtitles_dir = root / "subtitles"
@@ -280,7 +254,11 @@ def render_video(
     if use_ass_effects and subtitle_json_path.exists():
         segments = _load_subtitle_segments_wrapped(
             subtitle_json_path=subtitle_json_path,
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
             subtitle_size=subtitle_size,
+            subtitle_font=font_for_wrap or None,
+            subtitle_outline=outline_for_wrap,
         )
         ass_out = root / "subtitles" / "subtitles.effects.ass"
         ass_out.parent.mkdir(parents=True, exist_ok=True)

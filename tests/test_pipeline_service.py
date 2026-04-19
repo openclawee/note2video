@@ -19,7 +19,7 @@ from note2video.app.pipeline_service import (
 def test_build_runs_pipeline_in_order(monkeypatch, tmp_path) -> None:
     calls: list[tuple] = []
 
-    def fake_extract(input_path, out_dir, pages=None):
+    def fake_extract(input_path, out_dir, pages=None, **kwargs):
         calls.append(("extract", input_path, out_dir, pages))
         return SimpleNamespace(slide_count=3)
 

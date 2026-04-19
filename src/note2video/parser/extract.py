@@ -38,7 +38,16 @@ class PowerPointUnavailableError(RuntimeError):
     """Raised when PowerPoint automation is unavailable on this machine."""
 
 
-def extract_project(input_file: str, output_dir: str, pages: str | None = None) -> Manifest:
+def extract_project(
+    input_file: str,
+    output_dir: str,
+    pages: str | None = None,
+    *,
+    ratio: str | None = None,
+    resolution: str | None = None,
+    fps: int | None = None,
+    quality: str | None = None,
+) -> Manifest:
     """Extract slide images and speaker notes into the project workspace."""
     input_path = Path(input_file)
     if not input_path.exists():
@@ -105,6 +114,10 @@ def extract_project(input_file: str, output_dir: str, pages: str | None = None) 
         project_name=input_path.stem,
         input_file=str(input_path),
         slide_count=len(slides),
+        ratio=str(ratio or "16:9").strip() or "16:9",
+        resolution=str(resolution or "1080p").strip().lower() or "1080p",
+        fps=int(fps) if fps is not None else 30,
+        quality=str(quality or "standard").strip().lower() or "standard",
         outputs={
             "notes": "notes/notes.json",
             "notes_raw_txt_dir": "notes/raw",

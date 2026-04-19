@@ -302,7 +302,7 @@ def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:
 
     calls = []
 
-    def fake_extract(input_path, out_dir, pages=None):
+    def fake_extract(input_path, out_dir, pages=None, **kwargs):
         calls.append(("extract", input_path, out_dir, pages))
         scripts_dir = output_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -438,7 +438,7 @@ def test_build_command_uses_config_file_without_input_and_cli_overrides(tmp_path
 
     calls = []
 
-    def fake_extract(input_path, out_dir, pages=None):
+    def fake_extract(input_path, out_dir, pages=None, **kwargs):
         calls.append(("extract", input_path, out_dir, pages))
         scripts_dir = output_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
@@ -506,7 +506,7 @@ def test_build_command_save_config_writes_effective_profile(tmp_path, monkeypatc
     input_file.write_bytes(b"placeholder")
     save_path = tmp_path / "saved.build.json"
 
-    def fake_extract(input_path, out_dir, pages=None):
+    def fake_extract(input_path, out_dir, pages=None, **kwargs):
         scripts_dir = output_dir / "scripts"
         scripts_dir.mkdir(parents=True, exist_ok=True)
         (scripts_dir / "script.json").write_text('{"slides":[]}', encoding="utf-8")
