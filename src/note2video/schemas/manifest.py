@@ -21,6 +21,9 @@ class Manifest:
     input_file: str
     slide_count: int
     ratio: str = "16:9"
+    resolution: str = "1080p"
+    fps: int = 30
+    quality: str = "standard"
     tts_provider: str = ""
     voice: str = ""
     outputs: dict[str, str] = field(default_factory=dict)

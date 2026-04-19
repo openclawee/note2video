@@ -158,8 +158,22 @@ def run_build_pipeline(
     render_video_fn: Callable[..., dict[str, Any]] = render_video,
 ) -> dict[str, Any]:
     out_dir = Path(request.out_dir)
-    manifest = extract_project_fn(request.input_file, str(out_dir), pages=request.pages)
+    manifest = extract_project_fn(
+        request.input_file,
+        str(out_dir),
+        request.pages,
+        ratio=request.ratio,
+        resolution=request.resolution,
+        fps=int(request.fps),
+        quality=request.quality,
+    )
     script_path = out_dir / "scripts" / "script.json"
+    _merge_build_options_into_manifest(
+        out_dir / "manifest.json",
+        subtitle_font=request.subtitle_font,
+        subtitle_size=request.subtitle_size,
+        subtitle_outline=request.subtitle_outline,
+    )
 
     script_override = _resolve_script_override_text(request)
     if script_override is not None and str(script_override).strip():
@@ -245,6 +259,39 @@ def _resolve_script_override_text(request: BuildRequest) -> str | None:
         path = Path(str(request.script_file))
         return path.read_text(encoding="utf-8")
     return None
+
+
+def _merge_build_options_into_manifest(
+    manifest_path: Path,
+    *,
+    subtitle_font: str | None,
+    subtitle_size: int | None,
+    subtitle_outline: int | None,
+) -> None:
+    """Persist subtitle styling hints so `subtitle` can match final burn-in layout."""
+    if not manifest_path.exists():
+        return
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(m, dict):
+        return
+    changed = False
+    if subtitle_font is not None and str(subtitle_font).strip():
+        m["subtitle_font"] = str(subtitle_font).strip()
+        changed = True
+    if subtitle_size is not None:
+        m["subtitle_size"] = int(subtitle_size)
+        changed = True
+    elif "subtitle_size" not in m:
+        m["subtitle_size"] = 48
+        changed = True
+    if subtitle_outline is not None:
+        m["subtitle_outline"] = int(subtitle_outline)
+        changed = True
+    if changed:
+        manifest_path.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _load_manifest_slides_meta(manifest_path: Path) -> list[dict[str, Any]] | None:

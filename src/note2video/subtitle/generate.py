@@ -6,8 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from note2video.subtitle.ass import build_ass
-from note2video.subtitle.wrap import wrap_subtitle_text
+from note2video.subtitle.wrap import (
+    SubtitleWrapLayout,
+    subtitle_wrap_layout_from_canvas,
+    wrap_subtitle_text,
+)
 from note2video.text_segmentation import split_sentences
+from note2video.video_canvas import canvas_size
 
 _TRAILING_DISPLAY_PUNCT = "。！？!?；;：:，,、.…"
 
@@ -40,19 +45,33 @@ def generate_subtitles(input_json: str, output_dir: str) -> dict[str, Any]:
 
     scripts = _load_scripts(input_path)
     manifest = _load_manifest(manifest_path)
+    wrap_ctx = _subtitle_wrap_context(manifest)
     timing_segments = _load_timing_segments(project_dir, manifest)
     if timing_segments is not None:
-        segments = _build_segments_from_timings(timing_segments)
+        segments = _build_segments_from_timings(timing_segments, wrap_ctx=wrap_ctx)
     else:
         durations = _load_slide_durations(manifest)
-        segments = _build_segments(scripts=scripts, durations=durations)
+        segments = _build_segments(scripts=scripts, durations=durations, wrap_ctx=wrap_ctx)
     srt_path = subtitles_dir / "subtitles.srt"
     ass_path = subtitles_dir / "subtitles.ass"
     json_path = subtitles_dir / "subtitles.json"
 
     srt_path.write_text(_render_srt(segments), encoding="utf-8")
     # Always generate an ASS version too; it enables fade/scale/outline/shadow/highlight later.
-    ass_path.write_text(build_ass(segments=[segment.__dict__ for segment in segments]), encoding="utf-8")
+    ass_path.write_text(
+        build_ass(
+            segments=[segment.__dict__ for segment in segments],
+            font=wrap_ctx["font"],
+            font_size=int(wrap_ctx["font_size"]),
+            play_res_x=int(wrap_ctx["canvas_w"]),
+            play_res_y=int(wrap_ctx["canvas_h"]),
+            margin_l=int(wrap_ctx["margin_lr"]),
+            margin_r=int(wrap_ctx["margin_lr"]),
+            margin_v=int(wrap_ctx["margin_v"]),
+            outline=int(wrap_ctx["outline"]),
+        ),
+        encoding="utf-8",
+    )
     json_path.write_text(
         json.dumps(
             {"segments": [segment.__dict__ for segment in segments]},
@@ -125,10 +144,50 @@ def _load_timing_segments(project_dir: Path, manifest: dict[str, Any]) -> list[d
     return segments
 
 
+def _subtitle_wrap_context(manifest: dict[str, Any]) -> dict[str, Any]:
+    ratio = str(manifest.get("ratio") or "16:9").strip() or "16:9"
+    resolution = str(manifest.get("resolution") or "1080p").strip().lower() or "1080p"
+    canvas_w, canvas_h = canvas_size(ratio=ratio, resolution=resolution)
+    try:
+        fs = int(manifest.get("subtitle_size", 48) or 48)
+    except Exception:
+        fs = 48
+    fs = max(8, fs)
+    try:
+        outline = int(manifest.get("subtitle_outline", 1) or 1)
+    except Exception:
+        outline = 1
+    outline = max(0, outline)
+    font = str(manifest.get("subtitle_font") or "").strip()
+    scale_w = float(canvas_w) / 1920.0
+    margin_lr = max(24, int(round(80 * scale_w)))
+    margin_v = max(int(round(fs * 1.1)), int(round(60 * (float(canvas_h) / 1080.0))))
+    layout = subtitle_wrap_layout_from_canvas(
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
+        font_size=fs,
+        margin_l=margin_lr,
+        margin_r=margin_lr,
+        outline=outline,
+        max_lines=4,
+    )
+    return {
+        "layout": layout,
+        "font": font,
+        "font_size": fs,
+        "canvas_w": canvas_w,
+        "canvas_h": canvas_h,
+        "margin_lr": margin_lr,
+        "margin_v": margin_v,
+        "outline": outline,
+    }
+
+
 def _build_segments(
     *,
     scripts: list[dict[str, Any]],
     durations: dict[int, int],
+    wrap_ctx: dict[str, Any],
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     cursor_ms = 0
@@ -161,7 +220,7 @@ def _build_segments(
         sentence_start = cursor_ms
         for sentence, duration in zip(sentences, segment_durations):
             sentence_end = sentence_start + duration
-            sentence = _to_display_subtitle_text(sentence)
+            sentence = _to_display_subtitle_text(sentence, wrap_ctx=wrap_ctx)
             segments.append(
                 SubtitleSegment(
                     index=index,
@@ -181,11 +240,13 @@ def _build_segments(
 
 def _build_segments_from_timings(
     timing_segments: list[dict[str, Any]],
+    *,
+    wrap_ctx: dict[str, Any],
 ) -> list[SubtitleSegment]:
     segments: list[SubtitleSegment] = []
     for item in timing_segments:
         page = int(item["page"])
-        text = _to_display_subtitle_text(str(item.get("text", "")))
+        text = _to_display_subtitle_text(str(item.get("text", "")), wrap_ctx=wrap_ctx)
         segments.append(
             SubtitleSegment(
                 index=int(item["index"]),
@@ -202,8 +263,11 @@ def _split_sentences(text: str) -> list[str]:
     return split_sentences(text)
 
 
-def _to_display_subtitle_text(text: str) -> str:
-    return _strip_trailing_display_punct(wrap_subtitle_text(text))
+def _to_display_subtitle_text(text: str, *, wrap_ctx: dict[str, Any]) -> str:
+    layout: SubtitleWrapLayout | None = wrap_ctx.get("layout")  # type: ignore[assignment]
+    font = str(wrap_ctx.get("font") or "")
+    wrapped = wrap_subtitle_text(text, layout=layout, font_name=font)
+    return _strip_trailing_display_punct(wrapped)
 
 
 def _strip_trailing_display_punct(text: str) -> str:
