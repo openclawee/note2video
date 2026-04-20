@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from note2video.app.pipeline_service import BuildRequest
 from note2video.gui.app import (
     JobConfig,
@@ -11,6 +13,7 @@ from note2video.gui.app import (
     _job_config_from_build_profile,
     _job_config_to_build_profile,
     _run_extract_or_build,
+    _validate_stage_job_config,
 )
 
 
@@ -25,6 +28,13 @@ def _make_job_config(tmp_path: Path, mode: str = "build") -> JobConfig:
         voice_id="",
         tts_rate=1.0,
     )
+
+
+def _prepare_project_dir(tmp_path: Path) -> Path:
+    out_dir = tmp_path / "dist"
+    (out_dir / "scripts").mkdir(parents=True, exist_ok=True)
+    (out_dir / "scripts" / "script.json").write_text("{}", encoding="utf-8")
+    return out_dir
 
 
 def test_run_extract_mode_delegates_to_extract_service(monkeypatch, tmp_path) -> None:
@@ -146,6 +156,93 @@ def test_build_request_mapping_from_job_config(tmp_path) -> None:
     assert req.bgm_fade_out_s == 1.0
 
 
+def test_voice_cli_argv_uses_script_json_and_tts_args(tmp_path) -> None:
+    out_dir = _prepare_project_dir(tmp_path)
+    cfg = JobConfig(
+        mode="voice",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=out_dir,
+        pages="all",
+        tts_provider="edge",
+        voice_id="zh-CN-YunyangNeural",
+        tts_rate=1.15,
+    )
+
+    argv = _build_cli_argv_for_config(cfg)
+
+    assert argv[1:3] == ["-X", "utf8"]
+    assert argv[5] == "voice"
+    assert Path(argv[6]) == out_dir / "scripts" / "script.json"
+    assert argv[argv.index("--out") + 1] == str(out_dir)
+    assert argv[argv.index("--voice") + 1] == "zh-CN-YunyangNeural"
+    assert argv[argv.index("--tts-rate") + 1] == "1.15"
+    assert argv[-1] == "--json"
+
+
+def test_subtitle_cli_argv_uses_script_json(tmp_path) -> None:
+    out_dir = _prepare_project_dir(tmp_path)
+    cfg = JobConfig(
+        mode="subtitle",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=out_dir,
+        pages="all",
+        tts_provider="edge",
+        voice_id="",
+        tts_rate=1.0,
+    )
+
+    argv = _build_cli_argv_for_config(cfg)
+
+    assert argv[5] == "subtitle"
+    assert Path(argv[6]) == out_dir / "scripts" / "script.json"
+    assert argv[argv.index("--out") + 1] == str(out_dir)
+    assert argv[-1] == "--json"
+
+
+def test_render_cli_argv_uses_project_dir_and_render_options(tmp_path) -> None:
+    out_dir = _prepare_project_dir(tmp_path)
+    cfg = JobConfig(
+        mode="render",
+        pptx_path=tmp_path / "demo.pptx",
+        out_dir=out_dir,
+        pages="all",
+        ratio="9:16",
+        resolution="720p",
+        fps=24,
+        quality="high",
+        tts_provider="edge",
+        voice_id="",
+        tts_rate=1.0,
+        subtitle_color="#FFFFFF",
+        subtitle_font="Microsoft YaHei",
+        subtitle_size=42,
+        subtitle_outline=2,
+        subtitle_shadow=1,
+        subtitle_fade_in_ms=90,
+        subtitle_fade_out_ms=110,
+        subtitle_scale_from=98,
+        subtitle_scale_to=105,
+        subtitle_y_ratio=0.87,
+        bgm_path="bgm.mp3",
+        bgm_volume=0.2,
+        narration_volume=0.95,
+        bgm_fade_in_s=0.5,
+        bgm_fade_out_s=1.0,
+    )
+
+    argv = _build_cli_argv_for_config(cfg)
+
+    assert argv[5] == "render"
+    assert argv[6] == str(out_dir)
+    assert argv[argv.index("--out") + 1] == str(out_dir)
+    assert argv[argv.index("--ratio") + 1] == "9:16"
+    assert argv[argv.index("--resolution") + 1] == "720p"
+    assert argv[argv.index("--fps") + 1] == "24"
+    assert argv[argv.index("--quality") + 1] == "high"
+    assert argv[argv.index("--subtitle-font") + 1] == "Microsoft YaHei"
+    assert argv[argv.index("--subtitle-y-ratio") + 1] == "0.87"
+
+
 def test_build_cli_argv_includes_script_file_when_temp_path_set(tmp_path) -> None:
     script_path = tmp_path / "override.txt"
     script_path.write_text("hello", encoding="utf-8")
@@ -179,6 +276,45 @@ def test_build_cli_argv_includes_script_file_when_temp_path_set(tmp_path) -> Non
     assert "--script-file" in argv
     i = argv.index("--script-file")
     assert Path(argv[i + 1]).resolve() == script_path.resolve()
+
+
+def test_stage_validation_requires_script_json_for_voice(tmp_path) -> None:
+    out_dir = tmp_path / "dist"
+    out_dir.mkdir()
+    cfg = _make_job_config(tmp_path, mode="voice")
+    cfg = JobConfig(**{**cfg.__dict__, "out_dir": out_dir})
+
+    with pytest.raises(ValueError, match="scripts/script.json"):
+        _validate_stage_job_config("voice", cfg)
+
+
+def test_stage_validation_requires_render_artifacts(tmp_path) -> None:
+    out_dir = _prepare_project_dir(tmp_path)
+    (out_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    cfg = _make_job_config(tmp_path, mode="render")
+    cfg = JobConfig(**{**cfg.__dict__, "out_dir": out_dir})
+
+    with pytest.raises(ValueError, match="audio/merged.wav"):
+        _validate_stage_job_config("render", cfg)
+
+    (out_dir / "audio").mkdir()
+    (out_dir / "audio" / "merged.wav").write_bytes(b"wav")
+
+    with pytest.raises(ValueError, match="subtitles/subtitles.json"):
+        _validate_stage_job_config("render", cfg)
+
+
+def test_stage_validation_accepts_render_when_required_assets_exist(tmp_path) -> None:
+    out_dir = _prepare_project_dir(tmp_path)
+    (out_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    (out_dir / "audio").mkdir()
+    (out_dir / "audio" / "merged.wav").write_bytes(b"wav")
+    (out_dir / "subtitles").mkdir()
+    (out_dir / "subtitles" / "subtitles.json").write_text("[]", encoding="utf-8")
+    cfg = _make_job_config(tmp_path, mode="render")
+    cfg = JobConfig(**{**cfg.__dict__, "out_dir": out_dir})
+
+    _validate_stage_job_config("render", cfg)
 
 
 def test_build_request_prefers_script_file_over_script_text(tmp_path) -> None:

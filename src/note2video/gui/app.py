@@ -22,6 +22,8 @@ from note2video.build_profile import (
     request_kwargs_to_build_profile,
     save_build_profile,
 )
+from note2video.gui.preview_model import load_preview_data
+from note2video.gui.preview_widget import PreviewStyle, SubtitlePreviewWidget
 
 PREVIEW_SAMPLE_TEXT = "你好，这是一段音色试听。"
 
@@ -110,7 +112,7 @@ def _require_pyside6():
 
 @dataclass(frozen=True)
 class JobConfig:
-    mode: str  # "extract" | "build"
+    mode: str  # "extract" | "voice" | "subtitle" | "render" | "build"
     pptx_path: Path
     out_dir: Path
     pages: str
@@ -141,6 +143,80 @@ class JobConfig:
     narration_volume: float = 1.0
     bgm_fade_in_s: float = 0.0
     bgm_fade_out_s: float = 0.0
+
+
+_STAGE_ORDER = ("extract", "voice", "subtitle", "render", "build")
+_STAGE_LABELS = {
+    "extract": "Extract",
+    "voice": "Voice",
+    "subtitle": "Subtitle",
+    "render": "Render",
+    "build": "Build",
+}
+_BUILD_PHASES = ("extract", "voice", "subtitle", "render")
+
+
+def _normalize_stage(stage: str) -> str:
+    value = str(stage or "").strip().lower()
+    if value not in _STAGE_ORDER:
+        raise ValueError(f"不支持的阶段：{stage}")
+    return value
+
+
+def _stage_display_name(stage: str) -> str:
+    return _STAGE_LABELS.get(_normalize_stage(stage), str(stage or ""))
+
+
+def _stage_total_steps(stage: str) -> int:
+    return len(_BUILD_PHASES) if _normalize_stage(stage) == "build" else 1
+
+
+def _stage_script_json_path(project_dir: Path) -> Path:
+    return project_dir / "scripts" / "script.json"
+
+
+def _stage_manifest_path(project_dir: Path) -> Path:
+    return project_dir / "manifest.json"
+
+
+def _stage_merged_audio_path(project_dir: Path) -> Path:
+    return project_dir / "audio" / "merged.wav"
+
+
+def _stage_subtitle_json_path(project_dir: Path) -> Path:
+    return project_dir / "subtitles" / "subtitles.json"
+
+
+def _validate_stage_job_config(stage: str, config: JobConfig) -> None:
+    stage_name = _normalize_stage(stage)
+    pptx_text = str(config.pptx_path).strip()
+    out_text = str(config.out_dir).strip()
+
+    if stage_name in {"extract", "build"}:
+        if not pptx_text or pptx_text == "." or not config.pptx_path.exists() or config.pptx_path.suffix.lower() not in {".pptx", ".pdf"}:
+            raise ValueError("请选择有效的 .pptx 或 .pdf 文件。")
+        if not out_text or out_text == ".":
+            raise ValueError("请选择输出目录。")
+        return
+
+    if not out_text or out_text == ".":
+        raise ValueError("请选择项目输出目录。")
+    if not config.out_dir.exists() or not config.out_dir.is_dir():
+        raise ValueError("项目输出目录不存在，请先运行 Extract。")
+
+    if stage_name in {"voice", "subtitle"}:
+        if not _stage_script_json_path(config.out_dir).exists():
+            raise ValueError("未找到 scripts/script.json，请先运行 Extract。")
+        return
+
+    if stage_name == "render":
+        if not _stage_manifest_path(config.out_dir).exists():
+            raise ValueError("未找到 manifest.json，请先运行 Extract。")
+        if not _stage_merged_audio_path(config.out_dir).exists():
+            raise ValueError("未找到 audio/merged.wav，请先运行 Voice。")
+        if not _stage_subtitle_json_path(config.out_dir).exists():
+            raise ValueError("未找到 subtitles/subtitles.json，请先运行 Subtitle。")
+        return
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -364,9 +440,11 @@ def _build_worker(QtCore, config: JobConfig):
 
 def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
     # Force UTF-8 output so GUI logs can decode reliably on Windows.
+    stage = _normalize_stage(config.mode)
     argv: list[str] = [sys.executable, "-X", "utf8", "-m", "note2video.cli.main"]
-    if (config.mode or "").strip().lower() == "extract":
-        argv += [
+
+    if stage == "extract":
+        return argv + [
             "extract",
             str(config.pptx_path),
             "--out",
@@ -375,9 +453,80 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
             str(config.pages or "all"),
             "--json",
         ]
-        return argv
 
-    argv += [
+    if stage == "voice":
+        return argv + [
+            "voice",
+            str(_stage_script_json_path(config.out_dir)),
+            "--out",
+            str(config.out_dir),
+            "--tts-provider",
+            "edge",
+            "--voice",
+            str(config.voice_id or ""),
+            "--tts-rate",
+            str(float(config.tts_rate)),
+            "--json",
+        ]
+
+    if stage == "subtitle":
+        return argv + [
+            "subtitle",
+            str(_stage_script_json_path(config.out_dir)),
+            "--out",
+            str(config.out_dir),
+            "--json",
+        ]
+
+    if stage == "render":
+        render_argv = argv + [
+            "render",
+            str(config.out_dir),
+            "--out",
+            str(config.out_dir),
+            "--ratio",
+            str(config.ratio or "16:9"),
+            "--resolution",
+            str(config.resolution or "1080p"),
+            "--fps",
+            str(int(config.fps or 30)),
+            "--quality",
+            str(config.quality or "standard"),
+            "--bgm",
+            str(config.bgm_path or ""),
+            "--bgm-volume",
+            str(float(config.bgm_volume)),
+            "--bgm-fade-in",
+            str(float(config.bgm_fade_in_s)),
+            "--bgm-fade-out",
+            str(float(config.bgm_fade_out_s)),
+            "--narration-volume",
+            str(float(config.narration_volume)),
+            "--subtitle-color",
+            str(config.subtitle_color or ""),
+            "--subtitle-font",
+            str(config.subtitle_font or ""),
+            "--subtitle-size",
+            str(int(config.subtitle_size or 0)),
+            "--subtitle-fade-in-ms",
+            str(int(config.subtitle_fade_in_ms or 80)),
+            "--subtitle-fade-out-ms",
+            str(int(config.subtitle_fade_out_ms or 120)),
+            "--subtitle-scale-from",
+            str(int(config.subtitle_scale_from or 100)),
+            "--subtitle-scale-to",
+            str(int(config.subtitle_scale_to or 104)),
+            "--subtitle-outline",
+            str(int(config.subtitle_outline or 1)),
+            "--subtitle-shadow",
+            str(int(config.subtitle_shadow or 0)),
+            "--json",
+        ]
+        if config.subtitle_y_ratio is not None:
+            render_argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
+        return render_argv
+
+    build_argv = argv + [
         "build",
         str(config.pptx_path),
         "--out",
@@ -429,10 +578,11 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
         "--json",
     ]
     if config.subtitle_y_ratio is not None:
-        argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
+        build_argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
     if (config.script_temp_path or "").strip():
-        argv += ["--script-file", str(Path(config.script_temp_path).resolve())]
-    return argv
+        build_argv += ["--script-file", str(Path(config.script_temp_path).resolve())]
+    return build_argv
+
 
 
 def _run_pipeline_with_log(config: JobConfig, emit_log) -> int:
@@ -469,27 +619,71 @@ def _build_ui(QtWidgets, QtCore):
             self._preview_web_available: bool = False
             self._pipeline_busy = False
             self._pipeline_stage_label: str = ""
+            self._pipeline_active_mode: str = "build"
+            self._stage_buttons: dict[str, Any] = {}
             self._pipeline_proc: Any = None
             self._script_override_temp_path: str | None = None
+            self._preview_refresh_timer = QtCore.QTimer(self)
+            self._preview_refresh_timer.setSingleShot(True)
+            self._preview_page = 1
+            self._preview_cue_index = 0
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
 
             layout = QtWidgets.QVBoxLayout(central)
-            top = QtWidgets.QHBoxLayout()
-            layout.addLayout(top)
+            self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+            layout.addWidget(self.main_splitter, 1)
 
-            left = QtWidgets.QVBoxLayout()
-            right = QtWidgets.QVBoxLayout()
-            top.addLayout(left, 3)
-            top.addLayout(right, 2)
+            left_panel = QtWidgets.QWidget()
+            left_panel.setFixedWidth(420)
+            left_outer = QtWidgets.QVBoxLayout(left_panel)
+            left_outer.setContentsMargins(0, 0, 0, 0)
+            self.left_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+            self.left_splitter.setChildrenCollapsible(False)
+            left_outer.addWidget(self.left_splitter, 1)
+            self.settings_scroll = QtWidgets.QScrollArea()
+            self.settings_scroll.setWidgetResizable(True)
+            self.settings_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            self.settings_tabs = QtWidgets.QToolBox()
+            self.settings_scroll.setWidget(self.settings_tabs)
+            self.left_splitter.addWidget(self.settings_scroll)
+            self.main_splitter.addWidget(left_panel)
+
+            right_panel = QtWidgets.QWidget()
+            right_outer = QtWidgets.QVBoxLayout(right_panel)
+            right_outer.setContentsMargins(0, 0, 0, 0)
+            right_outer.setSpacing(0)
+            self.preview_panel = QtWidgets.QWidget()
+            preview_panel_outer = QtWidgets.QVBoxLayout(self.preview_panel)
+            preview_panel_outer.setContentsMargins(0, 0, 0, 0)
+            right_outer.addWidget(self.preview_panel, 1)
+            self.main_splitter.addWidget(right_panel)
+            self.main_splitter.setChildrenCollapsible(False)
+
+            project_tab = QtWidgets.QWidget()
+            project_layout = QtWidgets.QVBoxLayout(project_tab)
+            video_tab = QtWidgets.QWidget()
+            video_layout = QtWidgets.QVBoxLayout(video_tab)
+            tts_tab = QtWidgets.QWidget()
+            tts_layout = QtWidgets.QVBoxLayout(tts_tab)
+            audio_tab = QtWidgets.QWidget()
+            audio_layout = QtWidgets.QVBoxLayout(audio_tab)
+            subtitle_tab = QtWidgets.QWidget()
+            subtitle_layout = QtWidgets.QVBoxLayout(subtitle_tab)
+
+            self.settings_tabs.addItem(project_tab, "项目")
+            self.settings_tabs.addItem(video_tab, "视频")
+            self.settings_tabs.addItem(tts_tab, "配音")
+            self.settings_tabs.addItem(audio_tab, "音频")
+            self.settings_tabs.addItem(subtitle_tab, "字幕")
 
             # --- Project / IO ---
             io_group = QtWidgets.QGroupBox("项目")
             io_grid = QtWidgets.QGridLayout(io_group)
             io_grid.setColumnStretch(1, 1)
             io_grid.setColumnStretch(3, 1)
-            left.addWidget(io_group)
+            project_layout.addWidget(io_group)
 
             self.pptx_edit = QtWidgets.QLineEdit()
             self.pptx_btn = QtWidgets.QPushButton("选择…")
@@ -554,14 +748,14 @@ def _build_ui(QtWidgets, QtCore):
             tts_grid = QtWidgets.QGridLayout(tts_group)
             tts_grid.setColumnStretch(1, 1)
             tts_grid.setColumnStretch(3, 1)
-            left.addWidget(tts_group)
+            tts_layout.addWidget(tts_group)
 
             self._tts_provider_fixed = "edge"
             tts_grid.addWidget(QtWidgets.QLabel("Provider"), 0, 0)
             tts_grid.addWidget(QtWidgets.QLabel("edge（微软）"), 0, 1)
 
             self.locale_combo = QtWidgets.QComboBox()
-            self.locale_combo.setMinimumWidth(320)
+            self.locale_combo.setMinimumWidth(220)
             self.locale_combo.addItem("（请先刷新音色列表）", None)
             self.locale_combo.setToolTip("启动后会自动刷新音色；默认「中国大陆 · 普通话」。")
             tts_grid.addWidget(QtWidgets.QLabel("地区"), 0, 2)
@@ -570,7 +764,7 @@ def _build_ui(QtWidgets, QtCore):
             voice_row = QtWidgets.QHBoxLayout()
             self.voice_combo = QtWidgets.QComboBox()
             self.voice_combo.setEditable(True)
-            self.voice_combo.setMinimumWidth(240)
+            self.voice_combo.setMinimumWidth(180)
             self.voice_combo.setMaxVisibleItems(18)
             self._voice_combo_reset_default()
             self.voice_preview_btn = QtWidgets.QPushButton("试听")
@@ -594,7 +788,7 @@ def _build_ui(QtWidgets, QtCore):
             mix_grid = QtWidgets.QGridLayout(mix_group)
             mix_grid.setColumnStretch(1, 1)
             mix_grid.setColumnStretch(3, 1)
-            left.addWidget(mix_group)
+            audio_layout.addWidget(mix_group)
 
             # BGM mixer controls
             self.bgm_path_edit = QtWidgets.QLineEdit()
@@ -646,7 +840,7 @@ def _build_ui(QtWidgets, QtCore):
             render_grid = QtWidgets.QGridLayout(subtitle_group)
             render_grid.setColumnStretch(1, 1)
             render_grid.setColumnStretch(3, 1)
-            left.addWidget(subtitle_group)
+            subtitle_layout.addWidget(subtitle_group)
 
             # Subtitle color picker
             self.subtitle_color_value = QtWidgets.QLineEdit()
@@ -752,9 +946,7 @@ def _build_ui(QtWidgets, QtCore):
             os_row.addWidget(self.subtitle_shadow_spin)
             render_grid.addLayout(os_row, 7, 1)
 
-            left.addStretch(1)
-
-            # --- Optional narration script (right column, above Extract/Build) ---
+            # --- Narration script in project tab ---
             script_group = QtWidgets.QGroupBox("旁白脚本（可选）")
             script_outer = QtWidgets.QVBoxLayout(script_group)
             script_btn_row = QtWidgets.QHBoxLayout()
@@ -777,56 +969,133 @@ def _build_ui(QtWidgets, QtCore):
                 "支持：完整 script.json、scripts/all.txt 分段格式、或按空行分段且段数=幻灯片数时逐页对齐。"
             )
             script_outer.addWidget(self.script_edit, 1)
-            right.addWidget(script_group, 1)
+            project_layout.addWidget(script_group, 1)
+            project_layout.addStretch(1)
+            video_layout.addStretch(1)
+            tts_layout.addStretch(1)
+            audio_layout.addStretch(1)
+            subtitle_layout.addStretch(1)
 
-            # --- Buttons / Progress / Log on right ---
-            buttons = QtWidgets.QHBoxLayout()
-            right.addLayout(buttons)
-            self.extract_btn = QtWidgets.QPushButton("一键 Extract")
-            self.build_btn = QtWidgets.QPushButton("一键 Build")
-            self.stop_btn = QtWidgets.QPushButton("停止（当前任务）")
+            # --- Preview on right ---
+            preview_group = QtWidgets.QGroupBox("预览")
+            preview_outer = QtWidgets.QVBoxLayout(preview_group)
+            self.preview_widget = SubtitlePreviewWidget()
+            preview_outer.addWidget(self.preview_widget, 1)
+
+            preview_ctrl_row = QtWidgets.QHBoxLayout()
+            preview_ctrl_row.addWidget(QtWidgets.QLabel("页码"))
+            self.preview_page_spin = QtWidgets.QSpinBox()
+            self.preview_page_spin.setRange(1, 9999)
+            self.preview_page_spin.setValue(1)
+            preview_ctrl_row.addWidget(self.preview_page_spin)
+            preview_ctrl_row.addWidget(QtWidgets.QLabel("字幕"))
+            self.preview_cue_spin = QtWidgets.QSpinBox()
+            self.preview_cue_spin.setRange(1, 1)
+            self.preview_cue_spin.setValue(1)
+            self.preview_cue_spin.setEnabled(False)
+            preview_ctrl_row.addWidget(self.preview_cue_spin)
+            self.preview_cue_label = QtWidgets.QLabel("1/1")
+            preview_ctrl_row.addWidget(self.preview_cue_label)
+            self.preview_source_label = QtWidgets.QLabel("来源：-")
+            preview_ctrl_row.addWidget(self.preview_source_label)
+            preview_ctrl_row.addStretch(1)
+            preview_outer.addLayout(preview_ctrl_row)
+            self.preview_status_label = QtWidgets.QLabel("暂无预览")
+            self.preview_status_label.setWordWrap(True)
+            preview_outer.addWidget(self.preview_status_label)
+            self.preview_panel.layout().addWidget(preview_group, 1)
+
+            # --- Stage actions / Progress / Log on left ---
+            execution_group = QtWidgets.QGroupBox("执行")
+            execution_outer = QtWidgets.QVBoxLayout(execution_group)
+            execution_outer.setContentsMargins(8, 8, 8, 8)
+            execution_outer.setSpacing(8)
+
+            stage_buttons_row = QtWidgets.QHBoxLayout()
+            stage_buttons_row.setSpacing(8)
+            stage_specs = [
+                ("extract", "Extract"),
+                ("voice", "Voice"),
+                ("subtitle", "Subtitle"),
+                ("render", "Render"),
+                ("build", "Build"),
+            ]
+            for stage_name, label in stage_specs:
+                button = QtWidgets.QPushButton(label)
+                button.clicked.connect(partial(self._start, stage_name))
+                stage_buttons_row.addWidget(button)
+                self._stage_buttons[stage_name] = button
+            self.stop_btn = QtWidgets.QPushButton("停止")
             self.stop_btn.setEnabled(False)
-            buttons.addWidget(self.extract_btn)
-            buttons.addWidget(self.build_btn)
-            buttons.addWidget(self.stop_btn)
-            buttons.addStretch(1)
+            stage_buttons_row.addWidget(self.stop_btn)
+            execution_outer.addLayout(stage_buttons_row)
 
             self.progress = QtWidgets.QProgressBar()
-            self.progress.setRange(0, 4)
+            self.progress.setRange(0, len(_BUILD_PHASES))
             self.progress.setValue(0)
             self.progress.setTextVisible(True)
             self.progress.setFormat("就绪")
-            right.addWidget(self.progress)
+            execution_outer.addWidget(self.progress)
 
             self.log = QtWidgets.QPlainTextEdit()
             self.log.setReadOnly(True)
-            # Keep log compact; extra vertical space goes below.
-            self.log.setMaximumHeight(260)
-            right.addWidget(self.log, 0)
-            right.addStretch(1)
+            self.log.setMinimumHeight(180)
+            execution_outer.addWidget(self.log, 1)
 
-            self._thread = None
-            self._worker = None
+            self.left_splitter.addWidget(execution_group)
+            self.left_splitter.setStretchFactor(0, 3)
+            self.left_splitter.setStretchFactor(1, 1)
+            self.main_splitter.setStretchFactor(0, 2)
+            self.main_splitter.setStretchFactor(1, 5)
+            self._preview_refresh_timer.timeout.connect(self._refresh_preview)
 
             self.pptx_btn.clicked.connect(self._pick_pptx)
             self.compose_btn.clicked.connect(self._compose_from_template)
             self.out_btn.clicked.connect(self._pick_out_dir)
-            self.extract_btn.clicked.connect(lambda: self._start("extract"))
-            self.build_btn.clicked.connect(lambda: self._start("build"))
-            self.stop_btn.clicked.connect(self._stop)
-            self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
-            self.voice_preview_btn.clicked.connect(self._preview_voice)
+            self.bgm_path_btn.clicked.connect(self._pick_bgm)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
-            self.subtitle_y_ratio_enable.toggled.connect(self.subtitle_y_ratio_spin.setEnabled)
-            self.bgm_path_btn.clicked.connect(self._pick_bgm)
             self.profile_import_btn.clicked.connect(self._import_build_profile)
             self.profile_export_btn.clicked.connect(self._export_build_profile)
             self.script_load_btn.clicked.connect(self._load_script_file)
+            self.stop_btn.clicked.connect(self._stop)
+            self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
+            self.voice_preview_btn.clicked.connect(self._preview_voice)
+            self.subtitle_y_ratio_enable.toggled.connect(self.subtitle_y_ratio_spin.setEnabled)
+
+            self.pages_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.out_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.ratio_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+            self.resolution_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+            self.script_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.subtitle_font_edit.currentTextChanged.connect(self._schedule_preview_refresh)
+            self.subtitle_size_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.subtitle_outline_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.subtitle_shadow_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.subtitle_y_ratio_enable.toggled.connect(self._schedule_preview_refresh)
+            self.subtitle_y_ratio_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.preview_page_spin.valueChanged.connect(self._on_preview_page_changed)
+            self.preview_cue_spin.valueChanged.connect(self._on_preview_cue_changed)
+            self.settings_tabs.currentChanged.connect(self._schedule_preview_refresh)
 
             self._restore_gui_state_from_config()
             # Auto-load voices on startup. Default locale: zh-CN; default speaker: Yunyang.
             QtCore.QTimer.singleShot(0, self._refresh_voice_list)
+
+
+        def showEvent(self, event) -> None:  # noqa: N802
+            super().showEvent(event)
+            try:
+                if getattr(self, "_left_splitter_initialized", False):
+                    return
+                self._left_splitter_initialized = True
+                total_left = sum(self.left_splitter.sizes())
+                if total_left <= 0:
+                    total_left = max(1, self.left_splitter.height())
+                exec_size = max(1, int(round(total_left * 0.15)))
+                self.left_splitter.setSizes([max(1, total_left - exec_size), exec_size])
+            except Exception:
+                pass
 
         def closeEvent(self, event) -> None:  # noqa: N802
             try:
@@ -835,6 +1104,94 @@ def _build_ui(QtWidgets, QtCore):
                 # Never block window close due to config write errors.
                 self._append_log(traceback.format_exc())
             super().closeEvent(event)
+
+        def _preview_style(self) -> PreviewStyle:
+            subtitle_y_ratio = None
+            if bool(self.subtitle_y_ratio_enable.isChecked()):
+                subtitle_y_ratio = float(self.subtitle_y_ratio_spin.value())
+            return PreviewStyle(
+                subtitle_color=self.subtitle_color_value.text().strip() or None,
+                subtitle_font=self.subtitle_font_edit.currentText().strip(),
+                subtitle_size=int(self.subtitle_size_spin.value()),
+                subtitle_outline=int(self.subtitle_outline_spin.value()),
+                subtitle_shadow=int(self.subtitle_shadow_spin.value()),
+                subtitle_y_ratio=subtitle_y_ratio,
+            )
+
+        def _preview_source_label(self, source: str) -> str:
+            return {
+                "subtitle": "字幕",
+                "script": "脚本",
+                "sample": "示例",
+                "empty": "空白",
+            }.get(str(source or ""), str(source or "-"))
+
+        def _on_preview_page_changed(self, value: int) -> None:
+            self._preview_page = max(1, int(value))
+            self._preview_cue_index = 0
+            self.preview_cue_spin.blockSignals(True)
+            self.preview_cue_spin.setValue(1)
+            self.preview_cue_spin.blockSignals(False)
+            self._schedule_preview_refresh()
+
+        def _on_preview_cue_changed(self, value: int) -> None:
+            self._preview_cue_index = max(0, int(value) - 1)
+            self._schedule_preview_refresh()
+
+        def _schedule_preview_refresh(self, *_args) -> None:
+            self._preview_refresh_timer.start(180)
+
+        def _refresh_preview(self) -> None:
+            try:
+                page = max(1, int(self.preview_page_spin.value()))
+            except Exception:
+                page = max(1, int(self._preview_page or 1))
+            try:
+                cue_index = max(0, int(self.preview_cue_spin.value()) - 1)
+            except Exception:
+                cue_index = max(0, int(self._preview_cue_index or 0))
+            try:
+                data = load_preview_data(
+                    project_dir=self.out_edit.text().strip() or "dist",
+                    page=page,
+                    ratio=str(self.ratio_combo.currentData() or "16:9"),
+                    resolution=str(self.resolution_combo.currentData() or "1080p"),
+                    sample_text=self.script_edit.toPlainText().strip(),
+                    cue_index=cue_index,
+                )
+            except Exception as exc:
+                self.preview_widget.set_preview(data=None, style=self._preview_style())
+                self.preview_source_label.setText("来源：-")
+                self.preview_status_label.setText(f"预览加载失败：{exc}")
+                self.preview_cue_spin.blockSignals(True)
+                self.preview_cue_spin.setRange(1, 1)
+                self.preview_cue_spin.setValue(1)
+                self.preview_cue_spin.setEnabled(False)
+                self.preview_cue_spin.blockSignals(False)
+                self.preview_cue_label.setText("1/1")
+                return
+
+            self._preview_page = int(data.page)
+            self._preview_cue_index = max(0, int(data.active_cue_index)) if data.cue_count > 0 else 0
+            self.preview_page_spin.blockSignals(True)
+            page_min = min(data.available_pages) if data.available_pages else 1
+            page_max = max(data.available_pages) if data.available_pages else max(1, int(data.page_count or 1))
+            self.preview_page_spin.setRange(int(page_min), int(page_max))
+            self.preview_page_spin.setValue(int(data.page))
+            self.preview_page_spin.blockSignals(False)
+            self.preview_cue_spin.blockSignals(True)
+            cue_max = max(1, int(data.cue_count or 1))
+            self.preview_cue_spin.setRange(1, cue_max)
+            self.preview_cue_spin.setValue(self._preview_cue_index + 1)
+            self.preview_cue_spin.setEnabled(data.cue_count > 1)
+            self.preview_cue_spin.blockSignals(False)
+            self.preview_cue_label.setText(f"{self._preview_cue_index + 1}/{cue_max}" if data.cue_count else "0/0")
+            self.preview_widget.set_preview(data=data, style=self._preview_style())
+            source_text = self._preview_source_label(data.text_source)
+            if data.text_source == "subtitle" and data.cue_count > 0:
+                source_text = f"{source_text} · {self._preview_cue_index + 1}/{data.cue_count}"
+            self.preview_source_label.setText(f"来源：{source_text}")
+            self.preview_status_label.setText(data.status_text)
 
         def _restore_gui_state_from_config(self) -> None:
             from note2video.user_config import gui_state, load_user_config, normalize_user_config
@@ -893,15 +1250,11 @@ def _build_ui(QtWidgets, QtCore):
             except Exception:
                 pass
             try:
-                self.subtitle_fade_out_spin.setValue(
-                    int(st.get("subtitle_fade_out_ms", self.subtitle_fade_out_spin.value()))
-                )
+                self.subtitle_fade_out_spin.setValue(int(st.get("subtitle_fade_out_ms", self.subtitle_fade_out_spin.value())))
             except Exception:
                 pass
             try:
-                self.subtitle_scale_from_spin.setValue(
-                    int(st.get("subtitle_scale_from", self.subtitle_scale_from_spin.value()))
-                )
+                self.subtitle_scale_from_spin.setValue(int(st.get("subtitle_scale_from", self.subtitle_scale_from_spin.value())))
             except Exception:
                 pass
             try:
@@ -949,9 +1302,7 @@ def _build_ui(QtWidgets, QtCore):
             except Exception:
                 pass
             try:
-                self.narration_volume_spin.setValue(
-                    float(st.get("narration_volume", self.narration_volume_spin.value()))
-                )
+                self.narration_volume_spin.setValue(float(st.get("narration_volume", self.narration_volume_spin.value())))
             except Exception:
                 pass
             try:
@@ -963,7 +1314,40 @@ def _build_ui(QtWidgets, QtCore):
             except Exception:
                 pass
 
-            # window geometry
+            try:
+                preview_page = int(st.get("preview_page", 1) or 1)
+                self._preview_page = max(1, preview_page)
+                self.preview_page_spin.setValue(self._preview_page)
+            except Exception:
+                pass
+            try:
+                preview_cue_index = int(st.get("preview_cue_index", 0) or 0)
+                self._preview_cue_index = max(0, preview_cue_index)
+                self.preview_cue_spin.setValue(self._preview_cue_index + 1)
+            except Exception:
+                pass
+            try:
+                tab_index = int(st.get("settings_tab", 0) or 0)
+                if 0 <= tab_index < self.settings_tabs.count():
+                    self.settings_tabs.setCurrentIndex(tab_index)
+            except Exception:
+                pass
+            try:
+                splitter_sizes = st.get("main_splitter_sizes")
+                if isinstance(splitter_sizes, list) and len(splitter_sizes) >= 2:
+                    self.main_splitter.setSizes([max(1, int(splitter_sizes[0])), max(1, int(splitter_sizes[1]))])
+            except Exception:
+                pass
+
+            try:
+                left_splitter_sizes = st.get("left_splitter_sizes")
+                if isinstance(left_splitter_sizes, list) and len(left_splitter_sizes) >= 2:
+                    self.left_splitter.setSizes([max(1, int(left_splitter_sizes[0])), max(1, int(left_splitter_sizes[1]))])
+                else:
+                    self.left_splitter.setSizes([3, 1])
+            except Exception:
+                pass
+
             try:
                 w = int(st.get("window_w", 0) or 0)
                 h = int(st.get("window_h", 0) or 0)
@@ -971,6 +1355,8 @@ def _build_ui(QtWidgets, QtCore):
                     self.resize(w, h)
             except Exception:
                 pass
+
+            self._schedule_preview_refresh()
 
         def _persist_gui_state_to_config(self) -> None:
             from note2video.user_config import load_user_config, normalize_user_config, save_user_config
@@ -1005,6 +1391,11 @@ def _build_ui(QtWidgets, QtCore):
                     "narration_volume": float(self.narration_volume_spin.value()),
                     "bgm_fade_in_s": float(self.bgm_fade_in_spin.value()),
                     "bgm_fade_out_s": float(self.bgm_fade_out_spin.value()),
+                    "preview_page": int(self.preview_page_spin.value()),
+                    "preview_cue_index": max(0, int(self.preview_cue_spin.value()) - 1),
+                    "settings_tab": int(self.settings_tabs.currentIndex()),
+                    "main_splitter_sizes": [int(v) for v in self.main_splitter.sizes()],
+                    "left_splitter_sizes": [int(v) for v in self.left_splitter.sizes()],
                     "window_w": int(self.size().width()),
                     "window_h": int(self.size().height()),
                 }
@@ -1037,9 +1428,11 @@ def _build_ui(QtWidgets, QtCore):
             if dlg.exec():
                 col = dlg.currentColor()
                 self._set_subtitle_color(col.name().upper())
+                self._schedule_preview_refresh()
 
         def _clear_subtitle_color(self) -> None:
             self._set_subtitle_color(None)
+            self._schedule_preview_refresh()
 
         def _pick_bgm(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1155,7 +1548,7 @@ def _build_ui(QtWidgets, QtCore):
             if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听正在进行中，请稍候…")
                 return
-            if self._pipeline_busy or self._thread is not None:
+            if self._pipeline_busy:
                 self._append_log("当前有任务在运行，请稍后再试听。")
                 return
 
@@ -1526,7 +1919,6 @@ def _build_ui(QtWidgets, QtCore):
                 self._pipeline_busy = False
                 self._set_running(False)
                 self._pipeline_proc = None
-                self.progress.setRange(0, 4)
                 if int(exit_code) != 0:
                     QtWidgets.QMessageBox.warning(self, "模板生成失败", "compose 未成功完成，请查看日志。")
                     return
@@ -1546,10 +1938,12 @@ def _build_ui(QtWidgets, QtCore):
                     if isinstance(outp, str) and outp.strip():
                         self.pptx_edit.setText(outp.strip())
                         self._append_log(f"已填入 PPTX：{outp.strip()}")
+                        self._schedule_preview_refresh()
                         QtWidgets.QMessageBox.information(self, "模板生成完成", "已生成 PPTX，并自动填入输入框。")
                         return
                 # Fallback: still set to chosen output path.
                 self.pptx_edit.setText(str(Path(out_pptx).resolve()))
+                self._schedule_preview_refresh()
                 QtWidgets.QMessageBox.information(self, "模板生成完成", "已生成 PPTX，并自动填入输入框。")
 
             proc.errorOccurred.connect(_on_error)
@@ -1696,6 +2090,7 @@ def _build_ui(QtWidgets, QtCore):
             self.narration_volume_spin.setValue(float(config.narration_volume))
             self.bgm_fade_in_spin.setValue(float(config.bgm_fade_in_s))
             self.bgm_fade_out_spin.setValue(float(config.bgm_fade_out_s))
+            self._schedule_preview_refresh()
 
         def _import_build_profile(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1715,6 +2110,7 @@ def _build_ui(QtWidgets, QtCore):
                 QtWidgets.QMessageBox.warning(self, "导入失败", str(exc))
                 return
             self._append_log(f"已导入 build 配置：{path}")
+            self._schedule_preview_refresh()
 
         def _export_build_profile(self) -> None:
             QtWidgets = self._QtWidgets
@@ -1737,28 +2133,40 @@ def _build_ui(QtWidgets, QtCore):
                 return
             self._append_log(f"已导出 build 配置：{path}")
 
-        def _validate(self) -> JobConfig:
-            return self._collect_job_config(validate_paths=True)
+        def _validate(self, stage: str) -> JobConfig:
+            config = self._collect_job_config(validate_paths=False)
+            config = replace(config, mode=_normalize_stage(stage))
+            _validate_stage_job_config(stage, config)
+            return config
 
         def _set_running(self, running: bool) -> None:
-            self.extract_btn.setEnabled(not running)
-            self.build_btn.setEnabled(not running)
+            for button in self._stage_buttons.values():
+                button.setEnabled(not running)
             self.stop_btn.setEnabled(running)
+            self.pptx_btn.setEnabled(not running)
+            self.compose_btn.setEnabled(not running)
+            self.out_btn.setEnabled(not running)
+            self.bgm_path_btn.setEnabled(not running)
+            self.subtitle_color_btn.setEnabled(not running)
+            self.subtitle_color_clear_btn.setEnabled(not running)
             self.locale_combo.setEnabled(not running)
             self.voice_combo.setEnabled(not running)
             self.voice_preview_btn.setEnabled(not running and self._preview_thread is None and self._preview_proc is None)
             self.tts_rate_spin.setEnabled(not running)
+            self.ratio_combo.setEnabled(not running)
             self.resolution_combo.setEnabled(not running)
             self.fps_spin.setEnabled(not running)
             self.quality_combo.setEnabled(not running)
+            self.pages_edit.setReadOnly(running)
+            self.pptx_edit.setReadOnly(running)
+            self.out_edit.setReadOnly(running)
             self.script_edit.setReadOnly(running)
             self.script_load_btn.setEnabled(not running)
             self.profile_import_btn.setEnabled(not running)
             self.profile_export_btn.setEnabled(not running)
             self.progress.setEnabled(True)
             if not running:
-                # Keep the last progress visible; mark idle explicitly.
-                if self.progress.value() >= 4:
+                if self.progress.maximum() > 0 and self.progress.value() >= self.progress.maximum():
                     self.progress.setFormat("完成")
                 else:
                     self.progress.setFormat("就绪")
@@ -1766,35 +2174,54 @@ def _build_ui(QtWidgets, QtCore):
         def _handle_pipeline_log(self, text: str) -> None:
             self._append_log(text)
             t = (text or "").strip()
-            if t == "阶段：extract":
-                self.progress.setValue(1)
-                self._pipeline_stage_label = "extract (1/4)"
+            if not t:
+                return
+
+            stage = self._pipeline_active_mode or "build"
+            total_steps = _stage_total_steps(stage)
+            phase_lookup = {name: index + 1 for index, name in enumerate(_BUILD_PHASES)}
+
+            if t.startswith("阶段："):
+                phase_name = t[len("阶段：") :].strip().lower()
+                if stage == "build":
+                    step = phase_lookup.get(phase_name)
+                    if step is None:
+                        return
+                    self.progress.setValue(step)
+                    self._pipeline_stage_label = f"{phase_name} ({step}/{total_steps})"
+                else:
+                    if phase_name != stage:
+                        return
+                    self.progress.setValue(1)
+                    self._pipeline_stage_label = f"{phase_name} (1/1)"
                 self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
-            elif t == "阶段：voice":
-                self.progress.setValue(2)
-                self._pipeline_stage_label = "voice (2/4)"
-                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
-            elif t == "阶段：subtitle":
-                self.progress.setValue(3)
-                self._pipeline_stage_label = "subtitle (3/4)"
-                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
-            elif t == "阶段：render":
-                self.progress.setValue(4)
-                self._pipeline_stage_label = "render (4/4)"
-                self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
-            elif t.startswith("细节："):
+                return
+
+            if t.startswith("细节："):
                 detail = t[len("细节：") :].strip()
                 if self._pipeline_stage_label:
                     self.progress.setFormat(f"进度：{self._pipeline_stage_label} · {detail}")
                 else:
                     self.progress.setFormat(f"进度：{detail}")
-            elif t.startswith("完成："):
-                # Keep as-is; final "退出码" will come next.
-                pass
+                return
+
+            if t.startswith("完成："):
+                done_stage = t[len("完成：") :].strip().lower()
+                if stage == "build":
+                    if done_stage == "build":
+                        self.progress.setValue(total_steps)
+                        self._pipeline_stage_label = f"build ({total_steps}/{total_steps})"
+                        self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
+                elif done_stage == stage:
+                    self.progress.setValue(1)
+                    self._pipeline_stage_label = f"{stage} (1/1)"
+                    self.progress.setFormat(f"进度：{self._pipeline_stage_label}")
+                return
 
         def _start(self, mode: str) -> None:
             QtCore = self._QtCore
             QtWidgets = self._QtWidgets
+            stage = _normalize_stage(mode)
 
             if self._preview_thread is not None or self._preview_proc is not None:
                 self._append_log("试听进行中，请等待试听完成后再执行任务。")
@@ -1804,38 +2231,7 @@ def _build_ui(QtWidgets, QtCore):
                 return
 
             try:
-                config = self._validate()
-                config = JobConfig(
-                    mode=mode,
-                    pptx_path=config.pptx_path,
-                    out_dir=config.out_dir,
-                    pages=config.pages,
-                    tts_provider=config.tts_provider,
-                    voice_id=config.voice_id,
-                    tts_rate=config.tts_rate,
-                    ratio=config.ratio,
-                    resolution=config.resolution,
-                    fps=config.fps,
-                    quality=config.quality,
-                    script_text=config.script_text,
-                    script_temp_path=None,
-                    minimax_base_url=config.minimax_base_url,
-                    subtitle_color=config.subtitle_color,
-                    subtitle_fade_in_ms=config.subtitle_fade_in_ms,
-                    subtitle_fade_out_ms=config.subtitle_fade_out_ms,
-                    subtitle_scale_from=config.subtitle_scale_from,
-                    subtitle_scale_to=config.subtitle_scale_to,
-                    subtitle_outline=config.subtitle_outline,
-                    subtitle_shadow=config.subtitle_shadow,
-                    subtitle_font=config.subtitle_font,
-                    subtitle_size=config.subtitle_size,
-                    subtitle_y_ratio=config.subtitle_y_ratio,
-                    bgm_path=config.bgm_path,
-                    bgm_volume=config.bgm_volume,
-                    narration_volume=config.narration_volume,
-                    bgm_fade_in_s=config.bgm_fade_in_s,
-                    bgm_fade_out_s=config.bgm_fade_out_s,
-                )
+                config = self._validate(stage)
             except Exception as exc:
                 QtWidgets.QMessageBox.warning(self, "参数错误", str(exc))
                 return
@@ -1843,9 +2239,13 @@ def _build_ui(QtWidgets, QtCore):
             self.log.clear()
             self._append_log("开始运行…")
             self._pipeline_busy = True
+            self._pipeline_active_mode = stage
+            self._pipeline_stage_label = ""
             self._set_running(True)
+            total_steps = _stage_total_steps(stage)
+            self.progress.setRange(0, total_steps)
             self.progress.setValue(0)
-            self.progress.setFormat("进度：准备中 (0/4)")
+            self.progress.setFormat(f"进度：准备中 (0/{total_steps})")
 
             # Run pipeline via QProcess (no Python threads) for stability on Windows.
             proc = QtCore.QProcess(self)
@@ -1859,7 +2259,7 @@ def _build_ui(QtWidgets, QtCore):
                 self._script_override_temp_path = None
 
             config_for_proc = config
-            if (mode or "").strip().lower() == "build" and (config.script_text or "").strip():
+            if stage == "build" and (config.script_text or "").strip():
                 tf = tempfile.NamedTemporaryFile(
                     mode="w",
                     encoding="utf-8",
@@ -1943,7 +2343,11 @@ def _build_ui(QtWidgets, QtCore):
                 self._pipeline_busy = False
                 self._set_running(False)
                 self._pipeline_proc = None
-                if int(exit_code) != 0:
+                self._pipeline_stage_label = ""
+                self._pipeline_active_mode = "build"
+                if int(exit_code) == 0:
+                    self._schedule_preview_refresh()
+                else:
                     QtWidgets.QMessageBox.warning(self, "运行失败", "任务未成功完成，请查看下方日志。")
 
             proc.started.connect(_on_started)
@@ -1958,7 +2362,11 @@ def _build_ui(QtWidgets, QtCore):
             self._append_log(f"退出码：{exit_code}")
             self._pipeline_busy = False
             self._set_running(False)
-            if exit_code != 0:
+            self._pipeline_stage_label = ""
+            self._pipeline_active_mode = "build"
+            if exit_code == 0:
+                self._schedule_preview_refresh()
+            else:
                 QtWidgets.QMessageBox.warning(self, "运行失败", "任务未成功完成，请查看下方日志。")
 
         def _stop(self) -> None:

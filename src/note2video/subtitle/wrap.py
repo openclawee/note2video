@@ -43,9 +43,10 @@ def subtitle_wrap_layout_from_canvas(
     ml = max(0, int(margin_l))
     mr = max(0, int(margin_r))
     ol = max(0, int(outline))
-    # Reserve horizontal space for outline/shadow (ScaledBorderAndShadow in ASS).
+    # Reserve horizontal space for outline/shadow (ScaledBorderAndShadow).
     usable = cw - ml - mr - 2 * ol - 8
-    max_w = max(120, int(usable * 0.985))
+    safety_px = max(16, int(round(fs * 0.65)))
+    max_w = max(120, usable - safety_px)
     return SubtitleWrapLayout(max_width_px=max_w, font_size=fs, max_lines=max(1, int(max_lines)))
 
 
@@ -73,7 +74,7 @@ def wrap_subtitle_text(
         meas = _try_create_pil_measure(font_name=font_name, font_size=layout.font_size)
         if meas is not None:
             return _wrap_balanced_pixels(t, meas=meas, max_px=layout.max_width_px, max_lines=layout.max_lines)
-        m = estimate_max_chars_per_line(font_size=layout.font_size, max_width_px=layout.max_width_px)
+        m = estimate_max_chars_per_line(text=t, font_size=layout.font_size, max_width_px=layout.max_width_px)
         return _wrap_balanced_chars(t, max_chars_per_line=m, max_lines=layout.max_lines)
 
     return _wrap_balanced_chars(t, max_chars_per_line=max_chars_per_line, max_lines=max_lines)
@@ -119,12 +120,19 @@ def _load_pil_font(font_name: str, font_size: int):
         p = Path(raw)
         if p.is_file():
             candidates.append(str(p))
+        candidates.extend(_named_font_candidates(raw))
         candidates.extend([raw, f"{raw}.ttf", f"{raw}.ttc", f"{raw}.otf"])
     # Common Linux paths (Pillow may not resolve family names without fc-list).
     candidates.extend(
         [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            r"C:\Windows\Fonts\msyh.ttc",
+            r"C:\Windows\Fonts\msyhbd.ttc",
+            r"C:\Windows\Fonts\simhei.ttf",
+            r"C:\Windows\Fonts\simsun.ttc",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"C:\Windows\Fonts\segoeui.ttf",
         ]
     )
     for path in candidates:
@@ -135,6 +143,23 @@ def _load_pil_font(font_name: str, font_size: int):
         except OSError:
             continue
     return None
+
+
+def _named_font_candidates(font_name: str) -> list[str]:
+    key = font_name.strip().casefold()
+    if not key:
+        return []
+    windows = {
+        "microsoft yahei": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyhbd.ttc"],
+        "微软雅黑": [r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyhbd.ttc"],
+        "simhei": [r"C:\Windows\Fonts\simhei.ttf"],
+        "黑体": [r"C:\Windows\Fonts\simhei.ttf"],
+        "simsun": [r"C:\Windows\Fonts\simsun.ttc"],
+        "宋体": [r"C:\Windows\Fonts\simsun.ttc"],
+        "arial": [r"C:\Windows\Fonts\arial.ttf"],
+        "segoe ui": [r"C:\Windows\Fonts\segoeui.ttf"],
+    }
+    return windows.get(key, [])
 
 
 def _span_width(meas: _FontMeasure, t: str, start: int, end: int) -> int:
@@ -365,9 +390,35 @@ def _choose_cut_chars(
     return min(range(lo, hi + 1), key=sort_key)
 
 
-def estimate_max_chars_per_line(*, font_size: int, max_width_px: int) -> int:
-    """Rough char budget when Pillow font loading fails (Latin-heavy vs CJK)."""
+def estimate_max_chars_per_line(*, text: str = "", font_size: int, max_width_px: int) -> int:
+    """Rough char budget when Pillow font loading fails."""
     fs = max(8, int(font_size))
     mw = max(80, int(max_width_px))
-    est = int(mw / (0.58 * float(fs)))
-    return max(8, min(40, est))
+    stripped = str(text or "").strip()
+    cjk_ratio = _cjk_ratio(stripped)
+    per_char = 0.95 if cjk_ratio >= 0.5 else 0.58
+    est = int(mw / (per_char * float(fs)))
+    upper = 22 if cjk_ratio >= 0.5 else 40
+    lower = 6 if cjk_ratio >= 0.5 else 8
+    return max(lower, min(upper, est))
+
+
+def _cjk_ratio(text: str) -> float:
+    if not text:
+        return 0.0
+    visible = [ch for ch in text if not ch.isspace()]
+    if not visible:
+        return 0.0
+    cjk = sum(1 for ch in visible if _is_cjk(ch))
+    return float(cjk) / float(len(visible))
+
+
+def _is_cjk(ch: str) -> bool:
+    code = ord(ch)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x3040 <= code <= 0x30FF
+        or 0xAC00 <= code <= 0xD7AF
+    )

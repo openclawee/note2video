@@ -6,7 +6,7 @@ import pytest
 
 from note2video import user_config
 from note2video.tts.voice import invalidate_user_config_cache
-from note2video.user_config import minimax_host_ui_index_from_provider_cfg, normalize_user_config, tts_provider_config
+from note2video.user_config import gui_state, minimax_host_ui_index_from_provider_cfg, normalize_user_config, tts_provider_config
 
 
 def test_user_config_roundtrip(monkeypatch, tmp_path) -> None:
@@ -28,6 +28,40 @@ def test_user_config_roundtrip(monkeypatch, tmp_path) -> None:
     mm = tts_provider_config(norm, "minimax")
     assert mm["region"] == "cn"
     assert mm["model"] == "speech-2.8-hd"
+
+
+def test_gui_state_roundtrip(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(user_config, "user_config_path", lambda: path)
+
+    user_config.save_user_config(
+        {
+            "gui": {
+                "preview_page": 4,
+                "preview_cue_index": 1,
+                "settings_tab": 2,
+                "main_splitter_sizes": [700, 500],
+            }
+        }
+    )
+
+    loaded = user_config.load_user_config()
+    assert gui_state(loaded) == {
+        "preview_page": 4,
+        "preview_cue_index": 1,
+        "settings_tab": 2,
+        "main_splitter_sizes": [700, 500],
+    }
+
+
+def test_gui_state_keeps_settings_section_index(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "config.json"
+    monkeypatch.setattr(user_config, "user_config_path", lambda: path)
+
+    user_config.save_user_config({"gui": {"settings_tab": 3}})
+
+    loaded = user_config.load_user_config()
+    assert gui_state(loaded)["settings_tab"] == 3
 
 
 def test_get_minimax_api_base_url_reads_config_file(monkeypatch, tmp_path) -> None:

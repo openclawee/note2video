@@ -146,7 +146,7 @@ def generate_voice_assets(
             if not parts:
                 parts = [(text.strip(), 0)]
 
-            for idx, (sentence, pause_ms) in enumerate(parts, start=1):
+            for idx, (sentence, _pause_ms) in enumerate(parts, start=1):
                 sentence_file = audio_dir / f"{page:03d}.{idx:02d}.wav"
                 try:
                     provider.synthesize_to_file(text=sentence, output_file=sentence_file)
@@ -165,12 +165,6 @@ def generate_voice_assets(
                     ) from exc
                 sentence_duration_ms = _read_wav_duration_ms(sentence_file)
                 sentence_files.append(sentence_file)
-                pause_ms = int(pause_ms or 0)
-                pause_ms = max(0, min(pause_ms, 5000))
-                if pause_ms:
-                    pause_file = audio_dir / f"{page:03d}.{idx:02d}.pause.wav"
-                    _write_silence_wav(pause_file, duration_ms=pause_ms)
-                    sentence_files.append(pause_file)
                 timing_segments.append(
                     {
                         "page": page,
@@ -178,11 +172,11 @@ def generate_voice_assets(
                         "sentence_index": idx,
                         "text": sentence,
                         "start_ms": sentence_cursor_ms,
-                        "end_ms": sentence_cursor_ms + sentence_duration_ms + pause_ms,
-                        "duration_ms": sentence_duration_ms + pause_ms,
+                        "end_ms": sentence_cursor_ms + sentence_duration_ms,
+                        "duration_ms": sentence_duration_ms,
                     }
                 )
-                sentence_cursor_ms += sentence_duration_ms + pause_ms
+                sentence_cursor_ms += sentence_duration_ms
 
             _merge_wav_files(input_files=sentence_files, output_file=output_file)
             duration_ms = _read_wav_duration_ms(output_file)
@@ -432,9 +426,9 @@ def _split_tts_chunks_with_pauses(text: str) -> list[tuple[str, int]]:
 
     Some providers (notably edge-tts on certain networks) are more likely to fail on long sentences.
     We first split by punctuation/newlines, then further split overlong chunks by commas/whitespace.
-    """
+"""
     normalized = _sanitize_tts_text(text)
-    parts = _split_sentences_with_pauses(normalized)
+    parts = _split_sentences(normalized)
     if not parts:
         return []
 
@@ -446,12 +440,12 @@ def _split_tts_chunks_with_pauses(text: str) -> list[tuple[str, int]]:
     max_chars = max(80, min(max_chars, 800))
 
     out: list[tuple[str, int]] = []
-    for chunk, pause_ms in parts:
+    for chunk in parts:
         c = chunk.strip()
         if not c:
             continue
         if len(c) <= max_chars:
-            out.append((c, pause_ms))
+            out.append((c, 0))
             continue
 
         # First try to split by commas/顿号; keep punctuation.
@@ -468,11 +462,10 @@ def _split_tts_chunks_with_pauses(text: str) -> list[tuple[str, int]]:
             if len(candidate) <= max_chars:
                 buf = candidate
                 continue
-            out.append((buf.strip(), 80))
+            out.append((buf.strip(), 0))
             buf = sp
         if buf.strip():
-            # Keep the original pause on the last piece.
-            out.append((buf.strip(), pause_ms))
+            out.append((buf.strip(), 0))
 
     # Final pass: hard split any remaining very long chunks (no punctuation/commas).
     final: list[tuple[str, int]] = []
@@ -486,7 +479,7 @@ def _split_tts_chunks_with_pauses(text: str) -> list[tuple[str, int]]:
             start += max_chars
             if not piece:
                 continue
-            final.append((piece, pause_ms if start >= len(chunk) else 60))
+            final.append((piece, 0))
     return final
 
 
