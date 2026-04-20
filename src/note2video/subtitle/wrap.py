@@ -73,7 +73,16 @@ def wrap_subtitle_text(
     if layout is not None and layout.max_width_px > 0:
         meas = _try_create_pil_measure(font_name=font_name, font_size=layout.font_size)
         if meas is not None:
-            return _wrap_balanced_pixels(t, meas=meas, max_px=layout.max_width_px, max_lines=layout.max_lines)
+            max_px = layout.max_width_px
+            char_budget = estimate_max_chars_per_line(
+                text=t, font_size=layout.font_size, max_width_px=max_px
+            )
+            total_w = _span_width(meas, t, 0, len(t))
+            # Bitmap / Latin fonts often under-measure CJK width; still wrap when the
+            # width-derived char budget says the line is too long.
+            if total_w <= max_px and len(t) > char_budget:
+                return _wrap_balanced_chars(t, max_chars_per_line=char_budget, max_lines=layout.max_lines)
+            return _wrap_balanced_pixels(t, meas=meas, max_px=max_px, max_lines=layout.max_lines)
         m = estimate_max_chars_per_line(text=t, font_size=layout.font_size, max_width_px=layout.max_width_px)
         return _wrap_balanced_chars(t, max_chars_per_line=m, max_lines=layout.max_lines)
 
