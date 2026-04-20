@@ -31,3 +31,7 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Electron editor (standalone)
+editor-electron/node_modules/
+editor-electron/dist/
