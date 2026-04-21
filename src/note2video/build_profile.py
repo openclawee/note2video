@@ -96,6 +96,15 @@ def default_build_request_kwargs() -> dict[str, Any]:
         "subtitle_scale_to": 104,
         "subtitle_outline": 1,
         "subtitle_shadow": 0,
+        "avatar_video": None,
+        "avatar_pos": "bl",
+        "avatar_scale": 0.25,
+        "avatar_key": "auto",
+        "avatar_key_color": "#00ff00",
+        "avatar_key_similarity": 0.15,
+        "avatar_key_blend": 0.02,
+        "avatar_x_ratio": None,
+        "avatar_y_ratio": None,
     }
 
 
@@ -108,6 +117,7 @@ def normalize_build_profile(raw: dict[str, Any]) -> dict[str, Any]:
     audio_cfg = dict(_as_dict(data.get("audio")))
     subtitle_cfg = dict(_as_dict(data.get("subtitle")))
     subtitle_effects = dict(_as_dict(subtitle_cfg.get("effects")))
+    avatar_cfg = dict(_as_dict(data.get("avatar")))
 
     # Accept flat/manual-edited keys as a convenience.
     if "input_file" in data and "file" not in input_cfg:
@@ -164,6 +174,24 @@ def normalize_build_profile(raw: dict[str, Any]) -> dict[str, Any]:
         subtitle_effects["outline"] = data.get("subtitle_outline")
     if "subtitle_shadow" in data and "shadow" not in subtitle_effects:
         subtitle_effects["shadow"] = data.get("subtitle_shadow")
+    if "avatar_video" in data and "video" not in avatar_cfg:
+        avatar_cfg["video"] = data.get("avatar_video")
+    if "avatar_pos" in data and "pos" not in avatar_cfg:
+        avatar_cfg["pos"] = data.get("avatar_pos")
+    if "avatar_scale" in data and "scale" not in avatar_cfg:
+        avatar_cfg["scale"] = data.get("avatar_scale")
+    if "avatar_key" in data and "key" not in avatar_cfg:
+        avatar_cfg["key"] = data.get("avatar_key")
+    if "avatar_key_color" in data and "key_color" not in avatar_cfg:
+        avatar_cfg["key_color"] = data.get("avatar_key_color")
+    if "avatar_key_similarity" in data and "key_similarity" not in avatar_cfg:
+        avatar_cfg["key_similarity"] = data.get("avatar_key_similarity")
+    if "avatar_key_blend" in data and "key_blend" not in avatar_cfg:
+        avatar_cfg["key_blend"] = data.get("avatar_key_blend")
+    if "avatar_x_ratio" in data and "x_ratio" not in avatar_cfg:
+        avatar_cfg["x_ratio"] = data.get("avatar_x_ratio")
+    if "avatar_y_ratio" in data and "y_ratio" not in avatar_cfg:
+        avatar_cfg["y_ratio"] = data.get("avatar_y_ratio")
 
     return {
         "kind": BUILD_PROFILE_KIND,
@@ -209,6 +237,17 @@ def normalize_build_profile(raw: dict[str, Any]) -> dict[str, Any]:
                 "shadow": _clean_int(subtitle_effects.get("shadow"), 0),
             },
         },
+        "avatar": {
+            "video": _clean_str(avatar_cfg.get("video")),
+            "pos": _clean_str(avatar_cfg.get("pos")) or "bl",
+            "scale": _clean_float(avatar_cfg.get("scale"), 0.25),
+            "key": _clean_str(avatar_cfg.get("key")) or "auto",
+            "key_color": _clean_str(avatar_cfg.get("key_color")) or "#00ff00",
+            "key_similarity": _clean_float(avatar_cfg.get("key_similarity"), 0.15),
+            "key_blend": _clean_float(avatar_cfg.get("key_blend"), 0.02),
+            "x_ratio": _clean_optional_float(avatar_cfg.get("x_ratio")),
+            "y_ratio": _clean_optional_float(avatar_cfg.get("y_ratio")),
+        },
     }
 
 
@@ -242,6 +281,7 @@ def build_profile_to_request_kwargs(
     audio_cfg = normalized["audio"]
     subtitle_cfg = normalized["subtitle"]
     effects_cfg = subtitle_cfg["effects"]
+    avatar_cfg = _as_dict(normalized.get("avatar"))
 
     size = int(subtitle_cfg["size"])
 
@@ -273,6 +313,15 @@ def build_profile_to_request_kwargs(
         "subtitle_scale_to": _clean_int(effects_cfg.get("scale_to"), 104),
         "subtitle_outline": _clean_int(effects_cfg.get("outline"), 1),
         "subtitle_shadow": _clean_int(effects_cfg.get("shadow"), 0),
+        "avatar_video": _resolve_relative_path(_clean_optional_str(avatar_cfg.get("video")), base_dir=base_dir),
+        "avatar_pos": _clean_str(avatar_cfg.get("pos")) or "bl",
+        "avatar_scale": _clean_float(avatar_cfg.get("scale"), 0.25),
+        "avatar_key": _clean_str(avatar_cfg.get("key")) or "auto",
+        "avatar_key_color": _clean_str(avatar_cfg.get("key_color")) or "#00ff00",
+        "avatar_key_similarity": _clean_float(avatar_cfg.get("key_similarity"), 0.15),
+        "avatar_key_blend": _clean_float(avatar_cfg.get("key_blend"), 0.02),
+        "avatar_x_ratio": _clean_optional_float(avatar_cfg.get("x_ratio")),
+        "avatar_y_ratio": _clean_optional_float(avatar_cfg.get("y_ratio")),
     }
 
 
@@ -282,6 +331,8 @@ def request_kwargs_to_build_profile(values: dict[str, Any]) -> dict[str, Any]:
 
     subtitle_size = merged.get("subtitle_size")
     subtitle_y_ratio = merged.get("subtitle_y_ratio")
+    avatar_x_ratio = merged.get("avatar_x_ratio")
+    avatar_y_ratio = merged.get("avatar_y_ratio")
 
     return normalize_build_profile(
         {
@@ -327,6 +378,17 @@ def request_kwargs_to_build_profile(values: dict[str, Any]) -> dict[str, Any]:
                     "outline": int(merged.get("subtitle_outline") or 1),
                     "shadow": int(merged.get("subtitle_shadow") or 0),
                 },
+            },
+            "avatar": {
+                "video": merged.get("avatar_video") or "",
+                "pos": merged.get("avatar_pos") or "bl",
+                "scale": float(merged.get("avatar_scale") or 0.25),
+                "key": merged.get("avatar_key") or "auto",
+                "key_color": merged.get("avatar_key_color") or "#00ff00",
+                "key_similarity": float(merged.get("avatar_key_similarity") or 0.15),
+                "key_blend": float(merged.get("avatar_key_blend") or 0.02),
+                "x_ratio": float(avatar_x_ratio) if avatar_x_ratio is not None else None,
+                "y_ratio": float(avatar_y_ratio) if avatar_y_ratio is not None else None,
             },
         }
     )

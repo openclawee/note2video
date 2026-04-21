@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
+import shutil
 from pathlib import Path
 
 from note2video import __version__
@@ -191,6 +194,56 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="Optional subtitle vertical position ratio (0-1). Uses ASS \\pos() with horizontal center.",
     )
+    build_cmd.add_argument(
+        "--avatar-video",
+        default=argparse.SUPPRESS,
+        help="Optional avatar (digital human) video path to overlay as picture-in-picture.",
+    )
+    build_cmd.add_argument(
+        "--avatar-pos",
+        default=argparse.SUPPRESS,
+        help="Avatar position: bl|br|tl|tr (default bl).",
+    )
+    build_cmd.add_argument(
+        "--avatar-scale",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Avatar width as a ratio of output width (e.g. 0.25).",
+    )
+    build_cmd.add_argument(
+        "--avatar-key",
+        default=argparse.SUPPRESS,
+        help="Avatar auto keying: auto|none|green|blue|custom (default auto).",
+    )
+    build_cmd.add_argument(
+        "--avatar-key-color",
+        default=argparse.SUPPRESS,
+        help="Key color for avatar when --avatar-key=custom, e.g. #00ff00.",
+    )
+    build_cmd.add_argument(
+        "--avatar-key-similarity",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Key similarity threshold (typical 0.05-0.3).",
+    )
+    build_cmd.add_argument(
+        "--avatar-key-blend",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Key edge blend amount (typical 0.0-0.2).",
+    )
+    build_cmd.add_argument(
+        "--avatar-x-ratio",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Optional avatar left position ratio (0-1). Overrides --avatar-pos when set.",
+    )
+    build_cmd.add_argument(
+        "--avatar-y-ratio",
+        type=float,
+        default=argparse.SUPPRESS,
+        help="Optional avatar top position ratio (0-1). Overrides --avatar-pos when set.",
+    )
     # MiniMax CN/Global are separate providers; host selection is implied by --tts-provider.
     build_cmd.set_defaults(handler=handle_build)
 
@@ -332,7 +385,65 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional subtitle vertical position ratio (0-1). Uses ASS \\pos() with horizontal center.",
     )
+    render_cmd.add_argument(
+        "--avatar-video",
+        default="",
+        help="Optional avatar (digital human) video path to overlay as picture-in-picture.",
+    )
+    render_cmd.add_argument(
+        "--avatar-pos",
+        default="",
+        help="Avatar position: bl|br|tl|tr (default bl).",
+    )
+    render_cmd.add_argument(
+        "--avatar-scale",
+        type=float,
+        default=0.0,
+        help="Avatar width as a ratio of output width (e.g. 0.25). 0 = use manifest/default.",
+    )
+    render_cmd.add_argument(
+        "--avatar-key",
+        default="",
+        help="Avatar auto keying: auto|none|green|blue|custom (default auto).",
+    )
+    render_cmd.add_argument(
+        "--avatar-key-color",
+        default="",
+        help="Key color for avatar when --avatar-key=custom, e.g. #00ff00. Empty = manifest/default.",
+    )
+    render_cmd.add_argument(
+        "--avatar-key-similarity",
+        type=float,
+        default=0.0,
+        help="Key similarity threshold. 0 = manifest/default.",
+    )
+    render_cmd.add_argument(
+        "--avatar-key-blend",
+        type=float,
+        default=0.0,
+        help="Key edge blend amount. 0 = manifest/default.",
+    )
+    render_cmd.add_argument(
+        "--avatar-x-ratio",
+        type=float,
+        default=None,
+        help="Optional avatar left position ratio (0-1). Overrides --avatar-pos when set.",
+    )
+    render_cmd.add_argument(
+        "--avatar-y-ratio",
+        type=float,
+        default=None,
+        help="Optional avatar top position ratio (0-1). Overrides --avatar-pos when set.",
+    )
     render_cmd.set_defaults(handler=handle_render)
+
+    gui_cmd = subparsers.add_parser("gui", help="Launch the desktop GUI (PySide6).")
+    gui_cmd.add_argument(
+        "--editor",
+        action="store_true",
+        help="Launch the standalone Electron editor UI (requires Node.js; runs from the repo checkout).",
+    )
+    gui_cmd.set_defaults(handler=handle_gui)
 
     return parser
 
@@ -383,6 +494,15 @@ def _build_request_from_args(args: argparse.Namespace) -> BuildRequest:
         "subtitle_outline": "subtitle_outline",
         "subtitle_shadow": "subtitle_shadow",
         "subtitle_y_ratio": "subtitle_y_ratio",
+        "avatar_video": "avatar_video",
+        "avatar_pos": "avatar_pos",
+        "avatar_scale": "avatar_scale",
+        "avatar_key": "avatar_key",
+        "avatar_key_color": "avatar_key_color",
+        "avatar_key_similarity": "avatar_key_similarity",
+        "avatar_key_blend": "avatar_key_blend",
+        "avatar_x_ratio": "avatar_x_ratio",
+        "avatar_y_ratio": "avatar_y_ratio",
     }
     for arg_name, target_name in explicit_map.items():
         if arg_name in ns:
@@ -422,6 +542,15 @@ def _build_request_from_args(args: argparse.Namespace) -> BuildRequest:
         subtitle_y_ratio=(
             float(merged.get("subtitle_y_ratio")) if merged.get("subtitle_y_ratio") is not None else None
         ),
+        avatar_video=(str(merged.get("avatar_video") or "").strip() or None),
+        avatar_pos=str(merged.get("avatar_pos") or "bl"),
+        avatar_scale=float(merged.get("avatar_scale") or 0.25),
+        avatar_key=str(merged.get("avatar_key") or "auto"),
+        avatar_key_color=str(merged.get("avatar_key_color") or "#00ff00"),
+        avatar_key_similarity=float(merged.get("avatar_key_similarity") or 0.15),
+        avatar_key_blend=float(merged.get("avatar_key_blend") or 0.02),
+        avatar_x_ratio=(float(merged.get("avatar_x_ratio")) if merged.get("avatar_x_ratio") is not None else None),
+        avatar_y_ratio=(float(merged.get("avatar_y_ratio")) if merged.get("avatar_y_ratio") is not None else None),
     )
 
     save_config = str(getattr(args, "save_config", "") or "").strip()
@@ -589,6 +718,15 @@ def handle_render(args: argparse.Namespace) -> int:
             subtitle_font=(args.subtitle_font.strip() or None),
             subtitle_size=(int(args.subtitle_size) if int(args.subtitle_size or 0) > 0 else None),
             subtitle_y_ratio=(float(args.subtitle_y_ratio) if args.subtitle_y_ratio is not None else None),
+            avatar_video=(args.avatar_video.strip() or None),
+            avatar_pos=(args.avatar_pos.strip() or "bl"),
+            avatar_scale=(float(args.avatar_scale) if float(args.avatar_scale or 0.0) > 0 else 0.25),
+            avatar_key=(args.avatar_key.strip() or "auto"),
+            avatar_key_color=(args.avatar_key_color.strip() or "#00ff00"),
+            avatar_key_similarity=(float(args.avatar_key_similarity) if float(args.avatar_key_similarity or 0.0) > 0 else 0.15),
+            avatar_key_blend=(float(args.avatar_key_blend) if float(args.avatar_key_blend or 0.0) > 0 else 0.02),
+            avatar_x_ratio=(float(args.avatar_x_ratio) if args.avatar_x_ratio is not None else None),
+            avatar_y_ratio=(float(args.avatar_y_ratio) if args.avatar_y_ratio is not None else None),
         ),
         render_video_fn=render_video,
     )
@@ -606,6 +744,38 @@ def handle_render(args: argparse.Namespace) -> int:
     }
     return _emit_result(payload, json_output=args.json_output)
 
+
+def handle_gui(args: argparse.Namespace) -> int:
+    if getattr(args, "editor", False):
+        repo_root = Path(__file__).resolve().parents[3]
+        editor_dir = repo_root / "editor-electron"
+        if not editor_dir.exists():
+            print("[error] editor-electron directory not found. Run from the repo checkout.")
+            return 2
+
+        env = os.environ.copy()
+        # Keep output in the terminal so users can see Vite/Electron logs.
+        npm_exe = shutil.which("npm.cmd") or shutil.which("npm")
+        try:
+            if not npm_exe:
+                raise FileNotFoundError("npm")
+            subprocess.run([npm_exe, "install"], cwd=str(editor_dir), check=True, env=env)
+            subprocess.run([npm_exe, "run", "dev"], cwd=str(editor_dir), check=True, env=env)
+            return 0
+        except FileNotFoundError:
+            print("[error] npm not found. Please install Node.js (includes npm) to run the Electron editor.")
+            return 3
+        except subprocess.CalledProcessError as exc:
+            print(f"[error] Failed to launch editor: {exc}")
+            return 1
+
+    try:
+        from note2video.gui.app import main as gui_main
+
+        return int(gui_main([]) or 0)
+    except Exception as exc:
+        print(f"[error] {exc}")
+        return 1
 
 def handle_stub_command(args: argparse.Namespace) -> int:
     payload = {

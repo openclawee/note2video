@@ -71,6 +71,18 @@ Launch the app:
 note2video-gui
 ```
 
+Or launch via the main CLI (recommended):
+
+```bash
+note2video gui
+```
+
+Standalone Electron editor UI (optional; requires Node.js, run from the repo checkout):
+
+```bash
+note2video gui --editor
+```
+
 TTS 相关设置（MiniMax、火山引擎 / 豆包等）可在菜单 **设置 → TTS Provider…** 中编辑并写入用户配置文件（见下文各小节）。
 
 Package as an exe (PyInstaller; recommended to run in a clean venv):

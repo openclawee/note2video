@@ -88,9 +88,32 @@ def extract_project(
         try:
             total_slides = _count_slides_openxml(input_path)
             selected_pages = _parse_page_selection(pages, total_slides=total_slides)
-            slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=selected_pages)
+            try:
+                slide_data, extractor = _extract_slide_data(
+                    input_path,
+                    slides_dir,
+                    selected_pages=selected_pages,
+                    ratio=str(ratio or "16:9").strip() or "16:9",
+                    resolution=str(resolution or "1080p").strip().lower() or "1080p",
+                )
+            except TypeError:
+                # Backward-compatibility for tests/mocks.
+                slide_data, extractor = _extract_slide_data(
+                    input_path,
+                    slides_dir,
+                    selected_pages=selected_pages,
+                )
         except Exception:
-            slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=None)
+            try:
+                slide_data, extractor = _extract_slide_data(
+                    input_path,
+                    slides_dir,
+                    selected_pages=None,
+                    ratio=str(ratio or "16:9").strip() or "16:9",
+                    resolution=str(resolution or "1080p").strip().lower() or "1080p",
+                )
+            except TypeError:
+                slide_data, extractor = _extract_slide_data(input_path, slides_dir, selected_pages=None)
             selected_pages = _parse_page_selection(pages, total_slides=len(slide_data))
             if selected_pages is not None:
                 slide_data = [item for item in slide_data if item["page"] in selected_pages]
@@ -294,10 +317,28 @@ def _extract_slide_data(
     slides_dir: Path,
     *,
     selected_pages: set[int] | None,
+    ratio: str | None = None,
+    resolution: str | None = None,
+    **_kwargs: Any,
 ) -> tuple[list[dict[str, Any]], str]:
     if sys.platform == "win32":
+        # Keep tests stable: avoid PowerPoint COM under pytest workers.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return _extract_with_openxml(input_path, slides_dir, selected_pages=selected_pages), "openxml-fallback"
+        flag = os.environ.get("NOTE2VIDEO_USE_POWERPOINT", "").strip().lower()
+        if flag in {"0", "false", "no", "off"}:
+            return _extract_with_openxml(input_path, slides_dir, selected_pages=selected_pages), "openxml-fallback"
         try:
-            return _extract_with_powerpoint(input_path, slides_dir, selected_pages=selected_pages), "powerpoint-com"
+            return (
+                _extract_with_powerpoint(
+                    input_path,
+                    slides_dir,
+                    selected_pages=selected_pages,
+                    ratio=ratio or "16:9",
+                    resolution=resolution or "1080p",
+                ),
+                "powerpoint-com",
+            )
         except PowerPointUnavailableError:
             # Fallback keeps extraction available even when COM automation fails.
             return _extract_with_openxml(input_path, slides_dir, selected_pages=selected_pages), "openxml-fallback"
@@ -314,6 +355,8 @@ def _extract_with_powerpoint(
     slides_dir: Path,
     *,
     selected_pages: set[int] | None = None,
+    ratio: str | None = None,
+    resolution: str | None = None,
 ) -> list[dict[str, Any]]:
     """Use PowerPoint COM automation to export slide images and notes."""
     try:
@@ -352,13 +395,26 @@ def _extract_with_powerpoint(
         # 打开后立即藏窗口
         _hide_window()
 
+        export_w, export_h = _powerpoint_export_size(
+            ratio=ratio or "16:9",
+            resolution=resolution or "1080p",
+        )
+
         records: list[dict[str, Any]] = []
         for index, slide in enumerate(presentation.Slides, start=1):
             if selected_pages is not None and index not in selected_pages:
                 continue
             image_name = f"{index:03d}.png"
             image_path = slides_dir / image_name
-            slide.Export(str(image_path.resolve()), "PNG")
+            if export_w and export_h:
+                # Export(FileName, FilterName, ScaleWidth, ScaleHeight)
+                try:
+                    slide.Export(str(image_path.resolve()), "PNG", int(export_w), int(export_h))
+                except TypeError:
+                    # Some tests/mocks or PowerPoint builds only support the 2-arg overload.
+                    slide.Export(str(image_path.resolve()), "PNG")
+            else:
+                slide.Export(str(image_path.resolve()), "PNG")
 
             records.append(
                 {
@@ -381,6 +437,49 @@ def _extract_with_powerpoint(
         if app is not None:
             app.Quit()
         pythoncom.CoUninitialize()
+
+
+def _powerpoint_export_size(*, ratio: str, resolution: str) -> tuple[int | None, int | None]:
+    """
+    Determine PowerPoint Slide.Export target size.
+
+    Without explicit ScaleWidth/ScaleHeight, PowerPoint may export small PNGs depending
+    on Office version/settings, which then look blurry after render scaling.
+
+    Users can override with:
+    - NOTE2VIDEO_PPT_EXPORT_WIDTH / NOTE2VIDEO_PPT_EXPORT_HEIGHT (pixels)
+    Set either to 0/empty to disable explicit sizing.
+    """
+    env_w = (os.environ.get("NOTE2VIDEO_PPT_EXPORT_WIDTH") or "").strip()
+    env_h = (os.environ.get("NOTE2VIDEO_PPT_EXPORT_HEIGHT") or "").strip()
+    if env_w or env_h:
+        try:
+            w = int(env_w) if env_w else 0
+            h = int(env_h) if env_h else 0
+        except Exception:
+            w = h = 0
+        if w > 0 and h > 0:
+            return w, h
+        return None, None
+
+    r = str(ratio or "").strip().lower().replace("：", ":").replace("x", ":").replace(" ", "")
+    if r not in {"16:9", "9:16", "1:1"}:
+        r = "16:9"
+    res = str(resolution or "").strip().lower()
+    if res not in {"720p", "1080p", "1440p"}:
+        res = "1080p"
+
+    if r == "16:9":
+        base_w, base_h = 1920, 1080
+    elif r == "9:16":
+        base_w, base_h = 1080, 1920
+    else:
+        base_w, base_h = 1080, 1080
+
+    scale = {"720p": 2.0 / 3.0, "1080p": 1.0, "1440p": 4.0 / 3.0}[res]
+    w = int(round(base_w * scale))
+    h = int(round(base_h * scale))
+    return w, h
 
 
 def _extract_with_openxml(

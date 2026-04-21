@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Callable
 
@@ -40,6 +41,15 @@ class BuildRequest:
     subtitle_font: str | None = None
     subtitle_size: int | None = None
     subtitle_y_ratio: float | None = None
+    avatar_video: str | None = None
+    avatar_pos: str = "bl"
+    avatar_scale: float = 0.25
+    avatar_key: str = "auto"
+    avatar_key_color: str = "#00ff00"
+    avatar_key_similarity: float = 0.15
+    avatar_key_blend: float = 0.02
+    avatar_x_ratio: float | None = None
+    avatar_y_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +103,15 @@ class RenderRequest:
     subtitle_font: str | None = None
     subtitle_size: int | None = None
     subtitle_y_ratio: float | None = None
+    avatar_video: str | None = None
+    avatar_pos: str = "bl"
+    avatar_scale: float = 0.25
+    avatar_key: str = "auto"
+    avatar_key_color: str = "#00ff00"
+    avatar_key_similarity: float = 0.15
+    avatar_key_blend: float = 0.02
+    avatar_x_ratio: float | None = None
+    avatar_y_ratio: float | None = None
 
 
 class PipelineServiceError(RuntimeError):
@@ -131,6 +150,9 @@ class PipelineService:
             request.project_dir,
             request.output_path,
             ratio=request.ratio,
+            resolution=request.resolution,
+            fps=int(request.fps),
+            quality=request.quality,
             bgm_path=request.bgm_path,
             bgm_volume=float(request.bgm_volume),
             bgm_fade_in_s=float(request.bgm_fade_in_s),
@@ -146,6 +168,15 @@ class PipelineService:
             subtitle_font=request.subtitle_font,
             subtitle_size=request.subtitle_size,
             subtitle_y_ratio=request.subtitle_y_ratio,
+            avatar_video=request.avatar_video,
+            avatar_pos=request.avatar_pos,
+            avatar_scale=request.avatar_scale,
+            avatar_key=request.avatar_key,
+            avatar_key_color=request.avatar_key_color,
+            avatar_key_similarity=request.avatar_key_similarity,
+            avatar_key_blend=request.avatar_key_blend,
+            avatar_x_ratio=request.avatar_x_ratio,
+            avatar_y_ratio=request.avatar_y_ratio,
         )
 
 
@@ -195,6 +226,18 @@ def run_build_pipeline(
         tts_rate=request.tts_rate,
         minimax_base_url=None,
     )
+    _stage_avatar_after_voice(
+        out_dir,
+        avatar_video=request.avatar_video,
+        avatar_pos=request.avatar_pos,
+        avatar_scale=request.avatar_scale,
+        avatar_key=request.avatar_key,
+        avatar_key_color=request.avatar_key_color,
+        avatar_key_similarity=request.avatar_key_similarity,
+        avatar_key_blend=request.avatar_key_blend,
+        avatar_x_ratio=request.avatar_x_ratio,
+        avatar_y_ratio=request.avatar_y_ratio,
+    )
     subtitle_result = generate_subtitles_fn(str(script_path), str(out_dir))
     render_kwargs = {
         "ratio": request.ratio,
@@ -207,6 +250,15 @@ def run_build_pipeline(
         "bgm_fade_out_s": float(request.bgm_fade_out_s),
         "narration_volume": float(request.narration_volume),
         "subtitle_color": request.subtitle_color,
+        "avatar_video": request.avatar_video,
+        "avatar_pos": request.avatar_pos,
+        "avatar_scale": request.avatar_scale,
+        "avatar_key": request.avatar_key,
+        "avatar_key_color": request.avatar_key_color,
+        "avatar_key_similarity": request.avatar_key_similarity,
+        "avatar_key_blend": request.avatar_key_blend,
+        "avatar_x_ratio": request.avatar_x_ratio,
+        "avatar_y_ratio": request.avatar_y_ratio,
     }
     advanced_kwargs = {
         "subtitle_fade_in_ms": int(request.subtitle_fade_in_ms),
@@ -243,6 +295,79 @@ def run_build_pipeline(
         "subtitles_burned": bool(render_result["subtitles_burned"]),
         "mixed_audio": bool(render_result.get("mixed_audio")),
     }
+
+
+def _stage_avatar_after_voice(
+    out_dir: Path,
+    *,
+    avatar_video: str | None,
+    avatar_pos: str,
+    avatar_scale: float,
+    avatar_key: str,
+    avatar_key_color: str,
+    avatar_key_similarity: float,
+    avatar_key_blend: float,
+    avatar_x_ratio: float | None,
+    avatar_y_ratio: float | None,
+) -> None:
+    """
+    Pipeline stage: after voice, persist the provided avatar video into the project workspace
+    so render can pick it up without requiring external paths.
+    """
+    if avatar_video is None or not str(avatar_video).strip():
+        return
+    src = Path(str(avatar_video)).expanduser()
+    if not src.exists() or not src.is_file():
+        raise FileNotFoundError(f"Avatar video not found: {src}")
+
+    avatar_dir = out_dir / "avatar"
+    avatar_dir.mkdir(parents=True, exist_ok=True)
+    dest = avatar_dir / "avatar.mp4"
+    if dest.exists():
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+    shutil.copy2(src, dest)
+
+    manifest_path = out_dir / "manifest.json"
+    if not manifest_path.exists():
+        return
+    try:
+        m = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    if not isinstance(m, dict):
+        return
+    outputs = m.setdefault("outputs", {})
+    if isinstance(outputs, dict):
+        outputs["avatar_video"] = "avatar/avatar.mp4"
+    m["avatar_pos"] = str(avatar_pos or "bl")
+    try:
+        m["avatar_scale"] = float(avatar_scale)
+    except Exception:
+        m["avatar_scale"] = 0.25
+    m["avatar_key"] = str(avatar_key or "auto")
+    m["avatar_key_color"] = str(avatar_key_color or "#00ff00")
+    try:
+        m["avatar_key_similarity"] = float(avatar_key_similarity)
+    except Exception:
+        m["avatar_key_similarity"] = 0.15
+    try:
+        m["avatar_key_blend"] = float(avatar_key_blend)
+    except Exception:
+        m["avatar_key_blend"] = 0.02
+    if avatar_x_ratio is not None:
+        try:
+            m["avatar_x_ratio"] = float(avatar_x_ratio)
+        except Exception:
+            pass
+    if avatar_y_ratio is not None:
+        try:
+            m["avatar_y_ratio"] = float(avatar_y_ratio)
+        except Exception:
+            pass
+    manifest_path.write_text(json.dumps(m, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _resolve_script_override_text(request: BuildRequest) -> str | None:
@@ -514,6 +639,16 @@ def run_render_pipeline(
         subtitle_shadow=int(request.subtitle_shadow),
         subtitle_font=request.subtitle_font,
         subtitle_size=request.subtitle_size,
+        subtitle_y_ratio=request.subtitle_y_ratio,
+        avatar_video=request.avatar_video,
+        avatar_pos=request.avatar_pos,
+        avatar_scale=request.avatar_scale,
+        avatar_key=request.avatar_key,
+        avatar_key_color=request.avatar_key_color,
+        avatar_key_similarity=request.avatar_key_similarity,
+        avatar_key_blend=request.avatar_key_blend,
+        avatar_x_ratio=request.avatar_x_ratio,
+        avatar_y_ratio=request.avatar_y_ratio,
     )
     return {
         "input": request.project_dir,

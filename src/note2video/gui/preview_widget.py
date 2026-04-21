@@ -14,6 +14,12 @@ class PreviewStyle:
     subtitle_outline: int = 1
     subtitle_shadow: int = 0
     subtitle_y_ratio: float | None = None
+    avatar_enabled: bool = False
+    avatar_pos: str = "bl"
+    avatar_scale: float = 0.25
+    avatar_x_ratio: float | None = None
+    avatar_y_ratio: float | None = None
+    avatar_preview_image_path: str | None = None
 
 
 class SubtitlePreviewWidget:  # imported lazily from app.py after PySide6 is available
@@ -50,6 +56,7 @@ class SubtitlePreviewWidget:  # imported lazily from app.py after PySide6 is ava
                 target = self._fit_rect(frame, data.canvas_w, data.canvas_h)
                 self._draw_background(painter, target, data)
                 self._draw_header(painter, target, data)
+                self._draw_avatar_overlay(painter, target, data)
                 if data.active_text.strip():
                     self._draw_subtitle(painter, target, data)
                 else:
@@ -184,6 +191,92 @@ class SubtitlePreviewWidget:  # imported lazily from app.py after PySide6 is ava
                         pen = QtGui.QPen(outline_color, outline_px, QtCore.Qt.PenStyle.SolidLine, QtCore.Qt.PenCapStyle.RoundCap, QtCore.Qt.PenJoinStyle.RoundJoin)
                         painter.strokePath(path, pen)
                     painter.fillPath(path, color)
+
+            def _draw_avatar_overlay(self, painter, target, data: PreviewData) -> None:
+                """
+                Draw a picture-in-picture placeholder for the avatar video so users can
+                preview position and size without running a full render.
+                """
+                from PySide6 import QtCore, QtGui
+
+                style = self._preview_style
+                if not bool(getattr(style, "avatar_enabled", False)):
+                    return
+
+                # Compute overlay rect in canvas coordinate space first.
+                canvas_w = max(1, int(data.canvas_w))
+                canvas_h = max(1, int(data.canvas_h))
+                margin = max(12, int(round(canvas_w * 0.03)))
+                scale = max(0.05, min(0.8, float(getattr(style, "avatar_scale", 0.25) or 0.25)))
+                overlay_w = max(64, min(canvas_w, int(round(canvas_w * scale))))
+                # Prefer the extracted first-frame aspect ratio if available.
+                ar_w, ar_h = 16.0, 9.0
+                preview_path = str(getattr(style, "avatar_preview_image_path", "") or "").strip()
+                if preview_path:
+                    pix = QtGui.QPixmap(preview_path)
+                    if not pix.isNull() and pix.width() > 0 and pix.height() > 0:
+                        ar_w, ar_h = float(pix.width()), float(pix.height())
+                overlay_h = max(36, int(round(overlay_w * ar_h / ar_w)))
+                overlay_w = min(overlay_w, canvas_w - 2 * margin)
+                overlay_h = min(overlay_h, canvas_h - 2 * margin)
+
+                x_ratio = getattr(style, "avatar_x_ratio", None)
+                y_ratio = getattr(style, "avatar_y_ratio", None)
+                if x_ratio is not None or y_ratio is not None:
+                    try:
+                        xr = float(0.0 if x_ratio is None else x_ratio)
+                    except Exception:
+                        xr = 0.0
+                    try:
+                        yr = float(0.0 if y_ratio is None else y_ratio)
+                    except Exception:
+                        yr = 0.0
+                    xr = min(max(xr, 0.0), 1.0)
+                    yr = min(max(yr, 0.0), 1.0)
+                    x0 = int(round(margin + (canvas_w - overlay_w - 2 * margin) * xr))
+                    y0 = int(round(margin + (canvas_h - overlay_h - 2 * margin) * yr))
+                else:
+                    pos = str(getattr(style, "avatar_pos", "bl") or "bl").strip().lower()
+                    if pos == "br":
+                        x0, y0 = canvas_w - overlay_w - margin, canvas_h - overlay_h - margin
+                    elif pos == "tl":
+                        x0, y0 = margin, margin
+                    elif pos == "tr":
+                        x0, y0 = canvas_w - overlay_w - margin, margin
+                    else:  # bl
+                        x0, y0 = margin, canvas_h - overlay_h - margin
+
+                # Map canvas rect into widget (target) coordinates.
+                sx = float(target.width()) / float(canvas_w)
+                sy = float(target.height()) / float(canvas_h)
+                rect = QtCore.QRectF(
+                    float(target.left()) + float(x0) * sx,
+                    float(target.top()) + float(y0) * sy,
+                    float(overlay_w) * sx,
+                    float(overlay_h) * sy,
+                )
+
+                painter.save()
+                painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing, True)
+                painter.setPen(QtGui.QPen(QtGui.QColor("#00D4FF"), max(1.0, 2.0 * min(sx, sy))))
+                painter.setBrush(QtGui.QColor(0, 212, 255, 40))
+                painter.drawRoundedRect(rect, 8, 8)
+                if preview_path:
+                    pix = QtGui.QPixmap(preview_path)
+                    if not pix.isNull():
+                        inner = rect.adjusted(3, 3, -3, -3)
+                        painter.setClipRect(inner)
+                        img_rect = self._fit_rect(inner, pix.width(), pix.height())
+                        painter.drawPixmap(
+                            img_rect,
+                            pix,
+                            QtCore.QRectF(0.0, 0.0, float(pix.width()), float(pix.height())),
+                        )
+                        painter.setClipping(False)
+                painter.setPen(QtGui.QColor("#BFEFFF"))
+                painter.setFont(self._status_font())
+                painter.drawText(rect, int(QtCore.Qt.AlignmentFlag.AlignCenter), "数字人（PiP）")
+                painter.restore()
 
             def _draw_placeholder(self, painter, rect, text: str) -> None:
                 from PySide6 import QtCore, QtGui

@@ -143,6 +143,17 @@ class JobConfig:
     narration_volume: float = 1.0
     bgm_fade_in_s: float = 0.0
     bgm_fade_out_s: float = 0.0
+    # Avatar (digital human) picture-in-picture overlay
+    avatar_video: str = ""
+    avatar_pos: str = "bl"  # bl|br|tl|tr
+    avatar_scale: float = 0.25
+    avatar_key: str = "auto"  # auto|none|green|blue|custom
+    avatar_key_color: str = "#00ff00"
+    avatar_key_similarity: float = 0.15
+    avatar_key_blend: float = 0.02
+    avatar_use_relative_pos: bool = False
+    avatar_x_ratio: float = 0.0
+    avatar_y_ratio: float = 0.85
 
 
 _STAGE_ORDER = ("extract", "voice", "subtitle", "render", "build")
@@ -339,6 +350,15 @@ def _build_request_from_job_config(config: JobConfig) -> BuildRequest:
         subtitle_font=config.subtitle_font,
         subtitle_size=config.subtitle_size,
         subtitle_y_ratio=config.subtitle_y_ratio,
+        avatar_video=(config.avatar_video.strip() or None),
+        avatar_pos=str(config.avatar_pos or "bl"),
+        avatar_scale=float(config.avatar_scale or 0.25),
+        avatar_key=str(config.avatar_key or "auto"),
+        avatar_key_color=str(config.avatar_key_color or "#00ff00"),
+        avatar_key_similarity=float(config.avatar_key_similarity or 0.15),
+        avatar_key_blend=float(config.avatar_key_blend or 0.02),
+        avatar_x_ratio=(float(config.avatar_x_ratio) if bool(config.avatar_use_relative_pos) else None),
+        avatar_y_ratio=(float(config.avatar_y_ratio) if bool(config.avatar_use_relative_pos) else None),
     )
 
 
@@ -372,6 +392,15 @@ def _job_config_to_build_profile(config: JobConfig) -> dict[str, Any]:
             "subtitle_scale_to": int(config.subtitle_scale_to or 104),
             "subtitle_outline": int(config.subtitle_outline or 1),
             "subtitle_shadow": int(config.subtitle_shadow or 0),
+            "avatar_video": str(config.avatar_video or ""),
+            "avatar_pos": str(config.avatar_pos or "bl"),
+            "avatar_scale": float(config.avatar_scale or 0.25),
+            "avatar_key": str(config.avatar_key or "auto"),
+            "avatar_key_color": str(config.avatar_key_color or "#00ff00"),
+            "avatar_key_similarity": float(config.avatar_key_similarity or 0.15),
+            "avatar_key_blend": float(config.avatar_key_blend or 0.02),
+            "avatar_x_ratio": (float(config.avatar_x_ratio) if bool(config.avatar_use_relative_pos) else None),
+            "avatar_y_ratio": (float(config.avatar_y_ratio) if bool(config.avatar_use_relative_pos) else None),
         }
     )
 
@@ -416,6 +445,16 @@ def _job_config_from_build_profile(
         narration_volume=float(values.get("narration_volume") or 1.0),
         bgm_fade_in_s=float(values.get("bgm_fade_in_s") or 0.0),
         bgm_fade_out_s=float(values.get("bgm_fade_out_s") or 0.0),
+        avatar_video=str(values.get("avatar_video") or ""),
+        avatar_pos=str(values.get("avatar_pos") or "bl"),
+        avatar_scale=float(values.get("avatar_scale") or 0.25),
+        avatar_key=str(values.get("avatar_key") or "auto"),
+        avatar_key_color=str(values.get("avatar_key_color") or "#00ff00"),
+        avatar_key_similarity=float(values.get("avatar_key_similarity") or 0.15),
+        avatar_key_blend=float(values.get("avatar_key_blend") or 0.02),
+        avatar_use_relative_pos=(values.get("avatar_x_ratio") is not None or values.get("avatar_y_ratio") is not None),
+        avatar_x_ratio=float(values.get("avatar_x_ratio") or 0.0),
+        avatar_y_ratio=float(values.get("avatar_y_ratio") or 0.85),
     )
 
 
@@ -520,8 +559,29 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
             str(int(config.subtitle_outline or 1)),
             "--subtitle-shadow",
             str(int(config.subtitle_shadow or 0)),
+            "--avatar-video",
+            str(config.avatar_video or ""),
+            "--avatar-pos",
+            str(config.avatar_pos or "bl"),
+            "--avatar-scale",
+            str(float(config.avatar_scale or 0.25)),
+            "--avatar-key",
+            str(config.avatar_key or "auto"),
+            "--avatar-key-color",
+            str(config.avatar_key_color or "#00ff00"),
+            "--avatar-key-similarity",
+            str(float(config.avatar_key_similarity or 0.15)),
+            "--avatar-key-blend",
+            str(float(config.avatar_key_blend or 0.02)),
             "--json",
         ]
+        if bool(config.avatar_use_relative_pos):
+            render_argv += [
+                "--avatar-x-ratio",
+                str(float(config.avatar_x_ratio)),
+                "--avatar-y-ratio",
+                str(float(config.avatar_y_ratio)),
+            ]
         if config.subtitle_y_ratio is not None:
             render_argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
         return render_argv
@@ -575,8 +635,29 @@ def _build_cli_argv_for_config(config: JobConfig) -> list[str]:
         str(int(config.subtitle_outline or 1)),
         "--subtitle-shadow",
         str(int(config.subtitle_shadow or 0)),
+        "--avatar-video",
+        str(config.avatar_video or ""),
+        "--avatar-pos",
+        str(config.avatar_pos or "bl"),
+        "--avatar-scale",
+        str(float(config.avatar_scale or 0.25)),
+        "--avatar-key",
+        str(config.avatar_key or "auto"),
+        "--avatar-key-color",
+        str(config.avatar_key_color or "#00ff00"),
+        "--avatar-key-similarity",
+        str(float(config.avatar_key_similarity or 0.15)),
+        "--avatar-key-blend",
+        str(float(config.avatar_key_blend or 0.02)),
         "--json",
     ]
+    if bool(config.avatar_use_relative_pos):
+        build_argv += [
+            "--avatar-x-ratio",
+            str(float(config.avatar_x_ratio)),
+            "--avatar-y-ratio",
+            str(float(config.avatar_y_ratio)),
+        ]
     if config.subtitle_y_ratio is not None:
         build_argv += ["--subtitle-y-ratio", str(float(config.subtitle_y_ratio))]
     if (config.script_temp_path or "").strip():
@@ -627,6 +708,7 @@ def _build_ui(QtWidgets, QtCore):
             self._preview_refresh_timer.setSingleShot(True)
             self._preview_page = 1
             self._preview_cue_index = 0
+            self._avatar_preview_cache: dict[str, tuple[float, str]] = {}
 
             central = QtWidgets.QWidget(self)
             self.setCentralWidget(central)
@@ -673,7 +755,7 @@ def _build_ui(QtWidgets, QtCore):
             subtitle_layout = QtWidgets.QVBoxLayout(subtitle_tab)
 
             self.settings_tabs.addItem(project_tab, "项目")
-            self.settings_tabs.addItem(video_tab, "视频")
+            self.settings_tabs.addItem(video_tab, "数字人")
             self.settings_tabs.addItem(tts_tab, "配音")
             self.settings_tabs.addItem(audio_tab, "音频")
             self.settings_tabs.addItem(subtitle_tab, "字幕")
@@ -742,6 +824,95 @@ def _build_ui(QtWidgets, QtCore):
 
             # Spacer to keep grid compact
             # (ratio occupies col 2-3)
+
+            # --- Avatar (digital human) ---
+            avatar_group = QtWidgets.QGroupBox("数字人（画中画）")
+            avatar_grid = QtWidgets.QGridLayout(avatar_group)
+            avatar_grid.setColumnStretch(1, 1)
+            avatar_grid.setColumnStretch(3, 1)
+            video_layout.addWidget(avatar_group)
+
+            self.avatar_video_edit = QtWidgets.QLineEdit()
+            self.avatar_video_btn = QtWidgets.QPushButton("选择…")
+            avatar_row = QtWidgets.QHBoxLayout()
+            avatar_row.addWidget(self.avatar_video_edit, 1)
+            avatar_row.addWidget(self.avatar_video_btn)
+            avatar_grid.addWidget(QtWidgets.QLabel("视频"), 0, 0)
+            avatar_grid.addLayout(avatar_row, 0, 1, 1, 3)
+
+            self.avatar_pos_combo = QtWidgets.QComboBox()
+            self.avatar_pos_combo.addItem("左下角", "bl")
+            self.avatar_pos_combo.addItem("右下角", "br")
+            self.avatar_pos_combo.addItem("左上角", "tl")
+            self.avatar_pos_combo.addItem("右上角", "tr")
+            self.avatar_pos_combo.setToolTip("数字人画中画的位置。")
+            avatar_grid.addWidget(QtWidgets.QLabel("位置"), 1, 0)
+            avatar_grid.addWidget(self.avatar_pos_combo, 1, 1)
+
+            self.avatar_scale_spin = QtWidgets.QDoubleSpinBox()
+            self.avatar_scale_spin.setRange(0.05, 0.8)
+            self.avatar_scale_spin.setSingleStep(0.05)
+            self.avatar_scale_spin.setDecimals(2)
+            self.avatar_scale_spin.setValue(0.25)
+            self.avatar_scale_spin.setToolTip("数字人宽度占输出宽度比例（0.05~0.8）。")
+            avatar_grid.addWidget(QtWidgets.QLabel("比例"), 1, 2)
+            avatar_grid.addWidget(self.avatar_scale_spin, 1, 3)
+
+            self.avatar_key_combo = QtWidgets.QComboBox()
+            self.avatar_key_combo.addItem("自动（默认绿幕）", "auto")
+            self.avatar_key_combo.addItem("关闭抠像", "none")
+            self.avatar_key_combo.addItem("绿幕", "green")
+            self.avatar_key_combo.addItem("蓝幕", "blue")
+            self.avatar_key_combo.addItem("自定义颜色", "custom")
+            self.avatar_key_combo.setToolTip("自动抠像（色键）。")
+            avatar_grid.addWidget(QtWidgets.QLabel("抠像"), 2, 0)
+            avatar_grid.addWidget(self.avatar_key_combo, 2, 1)
+
+            self.avatar_key_color_edit = QtWidgets.QLineEdit("#00ff00")
+            self.avatar_key_color_edit.setToolTip("自定义抠像颜色（#RRGGBB），仅 custom 生效。")
+            avatar_grid.addWidget(QtWidgets.QLabel("颜色"), 2, 2)
+            avatar_grid.addWidget(self.avatar_key_color_edit, 2, 3)
+
+            self.avatar_key_similarity_spin = QtWidgets.QDoubleSpinBox()
+            self.avatar_key_similarity_spin.setRange(0.0, 1.0)
+            self.avatar_key_similarity_spin.setSingleStep(0.01)
+            self.avatar_key_similarity_spin.setDecimals(3)
+            self.avatar_key_similarity_spin.setValue(0.15)
+            self.avatar_key_similarity_spin.setToolTip("相似度阈值：越大抠得越狠。")
+            avatar_grid.addWidget(QtWidgets.QLabel("Similarity"), 3, 0)
+            avatar_grid.addWidget(self.avatar_key_similarity_spin, 3, 1)
+
+            self.avatar_key_blend_spin = QtWidgets.QDoubleSpinBox()
+            self.avatar_key_blend_spin.setRange(0.0, 1.0)
+            self.avatar_key_blend_spin.setSingleStep(0.01)
+            self.avatar_key_blend_spin.setDecimals(3)
+            self.avatar_key_blend_spin.setValue(0.02)
+            self.avatar_key_blend_spin.setToolTip("边缘融合：越大边缘越柔。")
+            avatar_grid.addWidget(QtWidgets.QLabel("Blend"), 3, 2)
+            avatar_grid.addWidget(self.avatar_key_blend_spin, 3, 3)
+
+            self.avatar_relative_enable = QtWidgets.QCheckBox("使用相对位置")
+            self.avatar_relative_enable.setToolTip("启用后使用 x/y 比例定位画中画（0~1），会覆盖上面的“位置”预设。")
+            self.avatar_x_ratio_spin = QtWidgets.QDoubleSpinBox()
+            self.avatar_x_ratio_spin.setRange(0.0, 1.0)
+            self.avatar_x_ratio_spin.setSingleStep(0.01)
+            self.avatar_x_ratio_spin.setDecimals(3)
+            self.avatar_x_ratio_spin.setValue(0.0)
+            self.avatar_x_ratio_spin.setEnabled(False)
+            self.avatar_y_ratio_spin = QtWidgets.QDoubleSpinBox()
+            self.avatar_y_ratio_spin.setRange(0.0, 1.0)
+            self.avatar_y_ratio_spin.setSingleStep(0.01)
+            self.avatar_y_ratio_spin.setDecimals(3)
+            self.avatar_y_ratio_spin.setValue(0.85)
+            self.avatar_y_ratio_spin.setEnabled(False)
+            rel_row = QtWidgets.QHBoxLayout()
+            rel_row.addWidget(self.avatar_relative_enable)
+            rel_row.addStretch(1)
+            rel_row.addWidget(QtWidgets.QLabel("x"))
+            rel_row.addWidget(self.avatar_x_ratio_spin)
+            rel_row.addWidget(QtWidgets.QLabel("y"))
+            rel_row.addWidget(self.avatar_y_ratio_spin)
+            avatar_grid.addLayout(rel_row, 4, 0, 1, 4)
 
             # --- TTS ---
             tts_group = QtWidgets.QGroupBox("配音（TTS）")
@@ -1053,6 +1224,7 @@ def _build_ui(QtWidgets, QtCore):
             self.compose_btn.clicked.connect(self._compose_from_template)
             self.out_btn.clicked.connect(self._pick_out_dir)
             self.bgm_path_btn.clicked.connect(self._pick_bgm)
+            self.avatar_video_btn.clicked.connect(self._pick_avatar_video)
             self.subtitle_color_btn.clicked.connect(self._pick_subtitle_color)
             self.subtitle_color_clear_btn.clicked.connect(self._clear_subtitle_color)
             self.profile_import_btn.clicked.connect(self._import_build_profile)
@@ -1062,12 +1234,24 @@ def _build_ui(QtWidgets, QtCore):
             self.locale_combo.currentIndexChanged.connect(self._repopulate_voice_combo)
             self.voice_preview_btn.clicked.connect(self._preview_voice)
             self.subtitle_y_ratio_enable.toggled.connect(self.subtitle_y_ratio_spin.setEnabled)
+            self.avatar_relative_enable.toggled.connect(self.avatar_x_ratio_spin.setEnabled)
+            self.avatar_relative_enable.toggled.connect(self.avatar_y_ratio_spin.setEnabled)
 
             self.pages_edit.textChanged.connect(self._schedule_preview_refresh)
             self.out_edit.textChanged.connect(self._schedule_preview_refresh)
             self.ratio_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
             self.resolution_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
             self.script_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.avatar_video_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.avatar_pos_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+            self.avatar_scale_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.avatar_key_combo.currentIndexChanged.connect(self._schedule_preview_refresh)
+            self.avatar_key_color_edit.textChanged.connect(self._schedule_preview_refresh)
+            self.avatar_key_similarity_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.avatar_key_blend_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.avatar_relative_enable.toggled.connect(self._schedule_preview_refresh)
+            self.avatar_x_ratio_spin.valueChanged.connect(self._schedule_preview_refresh)
+            self.avatar_y_ratio_spin.valueChanged.connect(self._schedule_preview_refresh)
             self.subtitle_font_edit.currentTextChanged.connect(self._schedule_preview_refresh)
             self.subtitle_size_spin.valueChanged.connect(self._schedule_preview_refresh)
             self.subtitle_outline_spin.valueChanged.connect(self._schedule_preview_refresh)
@@ -1109,6 +1293,13 @@ def _build_ui(QtWidgets, QtCore):
             subtitle_y_ratio = None
             if bool(self.subtitle_y_ratio_enable.isChecked()):
                 subtitle_y_ratio = float(self.subtitle_y_ratio_spin.value())
+            avatar_enabled = bool(self.avatar_video_edit.text().strip())
+            avatar_x_ratio = None
+            avatar_y_ratio = None
+            if bool(self.avatar_relative_enable.isChecked()):
+                avatar_x_ratio = float(self.avatar_x_ratio_spin.value())
+                avatar_y_ratio = float(self.avatar_y_ratio_spin.value())
+            avatar_preview_image_path = self._avatar_preview_png_path(self.avatar_video_edit.text().strip())
             return PreviewStyle(
                 subtitle_color=self.subtitle_color_value.text().strip() or None,
                 subtitle_font=self.subtitle_font_edit.currentText().strip(),
@@ -1116,7 +1307,61 @@ def _build_ui(QtWidgets, QtCore):
                 subtitle_outline=int(self.subtitle_outline_spin.value()),
                 subtitle_shadow=int(self.subtitle_shadow_spin.value()),
                 subtitle_y_ratio=subtitle_y_ratio,
+                avatar_enabled=avatar_enabled,
+                avatar_pos=str(self.avatar_pos_combo.currentData() or "bl"),
+                avatar_scale=float(self.avatar_scale_spin.value()),
+                avatar_x_ratio=avatar_x_ratio,
+                avatar_y_ratio=avatar_y_ratio,
+                avatar_preview_image_path=avatar_preview_image_path,
             )
+
+        def _avatar_preview_png_path(self, raw_video_path: str) -> str | None:
+            path_text = (raw_video_path or "").strip().strip('"')
+            if not path_text:
+                return None
+            video_path = Path(path_text)
+            if not video_path.exists() or not video_path.is_file():
+                return None
+            try:
+                mtime = float(video_path.stat().st_mtime)
+            except Exception:
+                mtime = 0.0
+
+            cached = self._avatar_preview_cache.get(str(video_path))
+            if cached and abs(cached[0] - mtime) < 1e-6:
+                cached_path = str(cached[1] or "")
+                if cached_path and Path(cached_path).exists():
+                    return cached_path
+
+            try:
+                import imageio_ffmpeg  # type: ignore
+                import subprocess
+                import tempfile
+
+                ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+                out_dir = Path(tempfile.gettempdir()) / "note2video_avatar_preview"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                out_png = out_dir / f"avatar_{abs(hash(str(video_path))) % 100000000:08d}.png"
+                cmd = [
+                    ffmpeg,
+                    "-y",
+                    "-ss",
+                    "0",
+                    "-i",
+                    str(video_path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=512:-2",
+                    str(out_png),
+                ]
+                subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+                if out_png.exists():
+                    self._avatar_preview_cache[str(video_path)] = (mtime, str(out_png))
+                    return str(out_png)
+            except Exception:
+                return None
+            return None
 
         def _preview_source_label(self, source: str) -> str:
             return {
@@ -1314,6 +1559,51 @@ def _build_ui(QtWidgets, QtCore):
             except Exception:
                 pass
 
+            # --- Avatar (digital human) ---
+            self.avatar_video_edit.setText(_get_str("avatar_video", "").strip())
+            pos = _get_str("avatar_pos", "bl").strip() or "bl"
+            idx_pos = self.avatar_pos_combo.findData(pos)
+            if idx_pos >= 0:
+                self.avatar_pos_combo.setCurrentIndex(idx_pos)
+            try:
+                self.avatar_scale_spin.setValue(float(st.get("avatar_scale", self.avatar_scale_spin.value()) or 0.25))
+            except Exception:
+                pass
+            key_mode = _get_str("avatar_key", "auto").strip() or "auto"
+            idx_key = self.avatar_key_combo.findData(key_mode)
+            if idx_key >= 0:
+                self.avatar_key_combo.setCurrentIndex(idx_key)
+            self.avatar_key_color_edit.setText(_get_str("avatar_key_color", "#00ff00").strip() or "#00ff00")
+            try:
+                self.avatar_key_similarity_spin.setValue(
+                    float(st.get("avatar_key_similarity", self.avatar_key_similarity_spin.value()) or 0.15)
+                )
+            except Exception:
+                pass
+            try:
+                self.avatar_key_blend_spin.setValue(
+                    float(st.get("avatar_key_blend", self.avatar_key_blend_spin.value()) or 0.02)
+                )
+            except Exception:
+                pass
+            try:
+                rel_enabled = _get_bool("avatar_use_relative_pos", False)
+                self.avatar_relative_enable.setChecked(rel_enabled)
+            except Exception:
+                pass
+            try:
+                rawx = st.get("avatar_x_ratio", None)
+                if rawx is not None and str(rawx).strip() != "":
+                    self.avatar_x_ratio_spin.setValue(float(rawx))
+            except Exception:
+                pass
+            try:
+                rawy = st.get("avatar_y_ratio", None)
+                if rawy is not None and str(rawy).strip() != "":
+                    self.avatar_y_ratio_spin.setValue(float(rawy))
+            except Exception:
+                pass
+
             try:
                 preview_page = int(st.get("preview_page", 1) or 1)
                 self._preview_page = max(1, preview_page)
@@ -1391,6 +1681,16 @@ def _build_ui(QtWidgets, QtCore):
                     "narration_volume": float(self.narration_volume_spin.value()),
                     "bgm_fade_in_s": float(self.bgm_fade_in_spin.value()),
                     "bgm_fade_out_s": float(self.bgm_fade_out_spin.value()),
+                    "avatar_video": self.avatar_video_edit.text().strip(),
+                    "avatar_pos": str(self.avatar_pos_combo.currentData() or "bl"),
+                    "avatar_scale": float(self.avatar_scale_spin.value()),
+                    "avatar_key": str(self.avatar_key_combo.currentData() or "auto"),
+                    "avatar_key_color": self.avatar_key_color_edit.text().strip() or "#00ff00",
+                    "avatar_key_similarity": float(self.avatar_key_similarity_spin.value()),
+                    "avatar_key_blend": float(self.avatar_key_blend_spin.value()),
+                    "avatar_use_relative_pos": bool(self.avatar_relative_enable.isChecked()),
+                    "avatar_x_ratio": float(self.avatar_x_ratio_spin.value()),
+                    "avatar_y_ratio": float(self.avatar_y_ratio_spin.value()),
                     "preview_page": int(self.preview_page_spin.value()),
                     "preview_cue_index": max(0, int(self.preview_cue_spin.value()) - 1),
                     "settings_tab": int(self.settings_tabs.currentIndex()),
@@ -1962,6 +2262,17 @@ def _build_ui(QtWidgets, QtCore):
             if path:
                 self.out_edit.setText(path)
 
+        def _pick_avatar_video(self) -> None:
+            QtWidgets = self._QtWidgets
+            path, _ = QtWidgets.QFileDialog.getOpenFileName(
+                self,
+                "选择数字人视频",
+                self.out_edit.text().strip() or str(Path.cwd()),
+                "Video (*.mp4 *.mov *.webm *.mkv *.avi);;All files (*)",
+            )
+            if path:
+                self.avatar_video_edit.setText(path)
+
         def _load_script_file(self) -> None:
             QtWidgets = self._QtWidgets
             path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -2011,6 +2322,16 @@ def _build_ui(QtWidgets, QtCore):
             bgm_fade_in_s = float(self.bgm_fade_in_spin.value())
             bgm_fade_out_s = float(self.bgm_fade_out_spin.value())
             script_text = self.script_edit.toPlainText()
+            avatar_video = self.avatar_video_edit.text().strip()
+            avatar_pos = str(self.avatar_pos_combo.currentData() or "bl")
+            avatar_scale = float(self.avatar_scale_spin.value())
+            avatar_key = str(self.avatar_key_combo.currentData() or "auto")
+            avatar_key_color = self.avatar_key_color_edit.text().strip() or "#00ff00"
+            avatar_key_similarity = float(self.avatar_key_similarity_spin.value())
+            avatar_key_blend = float(self.avatar_key_blend_spin.value())
+            avatar_use_relative_pos = bool(self.avatar_relative_enable.isChecked())
+            avatar_x_ratio = float(self.avatar_x_ratio_spin.value())
+            avatar_y_ratio = float(self.avatar_y_ratio_spin.value())
 
             if validate_paths:
                 if not pptx.exists() or pptx.suffix.lower() != ".pptx":
@@ -2048,6 +2369,16 @@ def _build_ui(QtWidgets, QtCore):
                 bgm_fade_in_s=bgm_fade_in_s,
                 bgm_fade_out_s=bgm_fade_out_s,
                 script_text=script_text,
+                avatar_video=avatar_video,
+                avatar_pos=avatar_pos,
+                avatar_scale=avatar_scale,
+                avatar_key=avatar_key,
+                avatar_key_color=avatar_key_color,
+                avatar_key_similarity=avatar_key_similarity,
+                avatar_key_blend=avatar_key_blend,
+                avatar_use_relative_pos=avatar_use_relative_pos,
+                avatar_x_ratio=avatar_x_ratio,
+                avatar_y_ratio=avatar_y_ratio,
             )
 
         def _apply_job_config(self, config: JobConfig) -> None:
@@ -2090,6 +2421,21 @@ def _build_ui(QtWidgets, QtCore):
             self.narration_volume_spin.setValue(float(config.narration_volume))
             self.bgm_fade_in_spin.setValue(float(config.bgm_fade_in_s))
             self.bgm_fade_out_spin.setValue(float(config.bgm_fade_out_s))
+            self.avatar_video_edit.setText(str(config.avatar_video or ""))
+            idx_pos = self.avatar_pos_combo.findData(str(config.avatar_pos or "bl"))
+            if idx_pos >= 0:
+                self.avatar_pos_combo.setCurrentIndex(idx_pos)
+            self.avatar_scale_spin.setValue(float(config.avatar_scale or 0.25))
+            idx_key = self.avatar_key_combo.findData(str(config.avatar_key or "auto"))
+            if idx_key >= 0:
+                self.avatar_key_combo.setCurrentIndex(idx_key)
+            self.avatar_key_color_edit.setText(str(config.avatar_key_color or "#00ff00"))
+            self.avatar_key_similarity_spin.setValue(float(config.avatar_key_similarity or 0.15))
+            self.avatar_key_blend_spin.setValue(float(config.avatar_key_blend or 0.02))
+            rel_enabled = bool(getattr(config, "avatar_use_relative_pos", False))
+            self.avatar_relative_enable.setChecked(rel_enabled)
+            self.avatar_x_ratio_spin.setValue(float(getattr(config, "avatar_x_ratio", 0.0) or 0.0))
+            self.avatar_y_ratio_spin.setValue(float(getattr(config, "avatar_y_ratio", 0.85) or 0.85))
             self._schedule_preview_refresh()
 
         def _import_build_profile(self) -> None:
@@ -2147,6 +2493,7 @@ def _build_ui(QtWidgets, QtCore):
             self.compose_btn.setEnabled(not running)
             self.out_btn.setEnabled(not running)
             self.bgm_path_btn.setEnabled(not running)
+            self.avatar_video_btn.setEnabled(not running)
             self.subtitle_color_btn.setEnabled(not running)
             self.subtitle_color_clear_btn.setEnabled(not running)
             self.locale_combo.setEnabled(not running)

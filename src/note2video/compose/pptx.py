@@ -29,6 +29,7 @@ XML_NS = {
 IMAGE_REL_TYPE = f"{DOC_REL_NS}/image"
 NOTES_REL_TYPE = f"{DOC_REL_NS}/notesSlide"
 SLIDE_REL_TYPE = f"{DOC_REL_NS}/slide"
+NOTES_MASTER_REL_TYPE = f"{DOC_REL_NS}/notesMaster"
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 
 ET.register_namespace("a", DML_NS)
@@ -98,12 +99,23 @@ def compose_pptx_from_template(
     base_dir = Path(assets_base_dir) if assets_base_dir else None
 
     if sys.platform == "win32":
-        return _compose_pptx_powerpoint_com(
-            template_path=template_path,
-            pages=pages,
-            out_path=out_path,
-            assets_base_dir=base_dir,
-        )
+        try:
+            return _compose_pptx_powerpoint_com(
+                template_path=template_path,
+                pages=pages,
+                out_path=out_path,
+                assets_base_dir=base_dir,
+            )
+        except ComposeError:
+            # PowerPoint COM provides the best fidelity on Windows, but it may be unavailable
+            # (not installed, locked-down environment, automation disabled). Fall back to
+            # OpenXML editing so `compose` can still work in CI/headless setups.
+            return _compose_pptx_openxml(
+                template_path=template_path,
+                pages=pages,
+                out_path=out_path,
+                assets_base_dir=base_dir,
+            )
     return _compose_pptx_openxml(
         template_path=template_path,
         pages=pages,
@@ -340,12 +352,21 @@ def _compose_pptx_openxml(
         applied_notes = 0
         slide_parts: list[str] = []
         notes_parts: list[str] = []
+        wrote_any_notes = False
 
         for slide_index, raw_page in enumerate(pages, start=1):
             page = raw_page if isinstance(raw_page, dict) else {}
             slide_root = deepcopy(base_slide_root)
             slide_rels_root = deepcopy(base_slide_rels_root)
-            notes_root = deepcopy(base_notes_root) if base_notes_root is not None else None
+            notes_value = page.get("notes")
+            wants_notes = notes_value is not None and str(notes_value).strip()
+
+            # If the template slide has no notes part, we can still create one on demand.
+            notes_root = (
+                deepcopy(base_notes_root)
+                if base_notes_root is not None
+                else (_build_notes_slide_root(str(notes_value)) if wants_notes else None)
+            )
 
             text_applied, text_ignored = _apply_text_fields_openxml(slide_root, page.get("fields"))
             applied_text += text_applied
@@ -362,13 +383,21 @@ def _compose_pptx_openxml(
             applied_images += image_applied
             ignored_images += image_ignored
 
-            notes_value = page.get("notes")
             if notes_root is not None:
-                if notes_value is not None and str(notes_value).strip():
-                    if _try_set_slide_notes_openxml(notes_root, str(notes_value)):
+                if wants_notes:
+                    # If we created a new notes root, it already contains the desired text.
+                    if base_notes_root is not None:
+                        if _try_set_slide_notes_openxml(notes_root, str(notes_value)):
+                            applied_notes += 1
+                    else:
                         applied_notes += 1
+                    wrote_any_notes = True
                 notes_part = f"ppt/notesSlides/notesSlide{slide_index}.xml"
-                _set_relationship_target(slide_rels_root, rel_type=NOTES_REL_TYPE, target=f"../notesSlides/notesSlide{slide_index}.xml")
+                _set_relationship_target(
+                    slide_rels_root,
+                    rel_type=NOTES_REL_TYPE,
+                    target=f"../notesSlides/notesSlide{slide_index}.xml",
+                )
                 _write_xml_part(work_dir, notes_part, notes_root)
                 notes_parts.append(notes_part)
             else:
@@ -380,6 +409,19 @@ def _compose_pptx_openxml(
             _write_xml_part(work_dir, _to_rels_path(slide_part), slide_rels_root)
 
         _rebuild_presentation_slides(presentation_root, presentation_rels_root, slide_parts)
+        if wrote_any_notes:
+            notes_master_part = _ensure_notes_master_parts(
+                work_dir=work_dir,
+                presentation_root=presentation_root,
+                presentation_rels_root=presentation_rels_root,
+                content_types_root=content_types_root,
+            )
+            for notes_part in notes_parts:
+                _write_notes_slide_rels(
+                    work_dir=work_dir,
+                    notes_part=notes_part,
+                    notes_master_part=notes_master_part,
+                )
         _rebuild_content_types(content_types_root, slide_parts, notes_parts, media_dir)
 
         _write_xml_part(work_dir, "ppt/presentation.xml", presentation_root)
@@ -480,6 +522,138 @@ def _try_set_slide_notes_openxml(notes_root: ET.Element, text: str) -> bool:
             continue
         return _set_text_body(shape, text)
     return False
+
+
+def _build_notes_slide_root(text: str) -> ET.Element:
+    """
+    Create a minimal notes slide XML that contains a body placeholder.
+    This lets us write speaker notes even when the template slide has no notes part.
+    """
+    notes = ET.Element(_qn(PML_NS, "notes"))
+    c_sld = ET.SubElement(notes, _qn(PML_NS, "cSld"))
+    sp_tree = ET.SubElement(c_sld, _qn(PML_NS, "spTree"))
+
+    nv_grp = ET.SubElement(sp_tree, _qn(PML_NS, "nvGrpSpPr"))
+    ET.SubElement(nv_grp, _qn(PML_NS, "cNvPr"), {"id": "1", "name": ""})
+    ET.SubElement(nv_grp, _qn(PML_NS, "cNvGrpSpPr"))
+    ET.SubElement(nv_grp, _qn(PML_NS, "nvPr"))
+
+    # A minimal required group properties container.
+    grp_sp_pr = ET.SubElement(sp_tree, _qn(PML_NS, "grpSpPr"))
+    ET.SubElement(grp_sp_pr, _qn(DML_NS, "xfrm"))
+
+    sp = ET.SubElement(sp_tree, _qn(PML_NS, "sp"))
+    nv_sp_pr = ET.SubElement(sp, _qn(PML_NS, "nvSpPr"))
+    ET.SubElement(nv_sp_pr, _qn(PML_NS, "cNvPr"), {"id": "2", "name": "Notes Placeholder 1"})
+    ET.SubElement(nv_sp_pr, _qn(PML_NS, "cNvSpPr"))
+    nv_pr = ET.SubElement(nv_sp_pr, _qn(PML_NS, "nvPr"))
+    ET.SubElement(nv_pr, _qn(PML_NS, "ph"), {"type": "body", "idx": "1"})
+
+    ET.SubElement(sp, _qn(PML_NS, "spPr"))
+    tx_body = ET.SubElement(sp, _qn(PML_NS, "txBody"))
+    ET.SubElement(tx_body, _qn(DML_NS, "bodyPr"))
+    ET.SubElement(tx_body, _qn(DML_NS, "lstStyle"))
+    # Write the text as one paragraph per line.
+    for paragraph_text in str(text or "").splitlines() or [""]:
+        tx_body.append(_build_text_paragraph(paragraph_text))
+
+    clr_map_ovr = ET.SubElement(notes, _qn(PML_NS, "clrMapOvr"))
+    ET.SubElement(clr_map_ovr, _qn(DML_NS, "masterClrMapping"))
+
+    return notes
+
+
+def _ensure_notes_master_parts(
+    *,
+    work_dir: Path,
+    presentation_root: ET.Element,
+    presentation_rels_root: ET.Element,
+    content_types_root: ET.Element,
+) -> str:
+    """
+    Ensure the PPTX package contains a notes master and presentation references to it.
+
+    PowerPoint may ignore notesSlides unless a notesMaster exists and notesSlide rels
+    point to that master.
+    """
+    notes_master_part = "ppt/notesMasters/notesMaster1.xml"
+    notes_master_path = work_dir / Path(notes_master_part)
+    if not notes_master_path.exists():
+        _write_xml_part(work_dir, notes_master_part, _build_notes_master_root())
+
+    # Content type override for notes master.
+    part_name = f"/{notes_master_part}"
+    has_override = False
+    for override in content_types_root.findall("./ct:Override", XML_NS):
+        if override.get("PartName") == part_name:
+            has_override = True
+            break
+    if not has_override:
+        override = ET.SubElement(content_types_root, _qn(CONTENT_TYPES_NS, "Override"))
+        override.set("PartName", part_name)
+        override.set("ContentType", "application/vnd.openxmlformats-officedocument.presentationml.notesMaster+xml")
+
+    # Relationship from presentation.xml.rels to notes master.
+    rel_id = None
+    for rel in presentation_rels_root.findall("./rel:Relationship", XML_NS):
+        if rel.get("Type") == NOTES_MASTER_REL_TYPE:
+            rel_id = rel.get("Id")
+            break
+    if rel_id is None:
+        rel_id = _append_relationship(
+            presentation_rels_root,
+            rel_type=NOTES_MASTER_REL_TYPE,
+            target=posixpath.relpath(notes_master_part, posixpath.dirname("ppt/presentation.xml")),
+        )
+
+    # presentation.xml needs <p:notesMasterIdLst><p:notesMasterId r:id="..."/></...>
+    notes_master_id_lst = presentation_root.find("./p:notesMasterIdLst", XML_NS)
+    if notes_master_id_lst is None:
+        notes_master_id_lst = ET.Element(_qn(PML_NS, "notesMasterIdLst"))
+        # Insert near the top but after sldIdLst if present.
+        sld_id_lst = presentation_root.find("./p:sldIdLst", XML_NS)
+        if sld_id_lst is not None:
+            idx = list(presentation_root).index(sld_id_lst) + 1
+            presentation_root.insert(idx, notes_master_id_lst)
+        else:
+            presentation_root.insert(0, notes_master_id_lst)
+    # Ensure at least one notesMasterId exists.
+    existing = notes_master_id_lst.find("./p:notesMasterId", XML_NS)
+    if existing is None:
+        node = ET.SubElement(notes_master_id_lst, _qn(PML_NS, "notesMasterId"))
+        node.set(f"{{{DOC_REL_NS}}}id", rel_id)
+
+    return notes_master_part
+
+
+def _build_notes_master_root() -> ET.Element:
+    master = ET.Element(_qn(PML_NS, "notesMaster"))
+    c_sld = ET.SubElement(master, _qn(PML_NS, "cSld"))
+    sp_tree = ET.SubElement(c_sld, _qn(PML_NS, "spTree"))
+
+    nv_grp = ET.SubElement(sp_tree, _qn(PML_NS, "nvGrpSpPr"))
+    ET.SubElement(nv_grp, _qn(PML_NS, "cNvPr"), {"id": "1", "name": ""})
+    ET.SubElement(nv_grp, _qn(PML_NS, "cNvGrpSpPr"))
+    ET.SubElement(nv_grp, _qn(PML_NS, "nvPr"))
+
+    grp_sp_pr = ET.SubElement(sp_tree, _qn(PML_NS, "grpSpPr"))
+    ET.SubElement(grp_sp_pr, _qn(DML_NS, "xfrm"))
+
+    # Minimal color mapping override.
+    clr_map_ovr = ET.SubElement(master, _qn(PML_NS, "clrMapOvr"))
+    ET.SubElement(clr_map_ovr, _qn(DML_NS, "masterClrMapping"))
+    return master
+
+
+def _write_notes_slide_rels(*, work_dir: Path, notes_part: str, notes_master_part: str) -> None:
+    rels_part = _to_rels_path(notes_part)
+    root = _new_relationships_root()
+    _append_relationship(
+        root,
+        rel_type=NOTES_MASTER_REL_TYPE,
+        target=posixpath.relpath(notes_master_part, posixpath.dirname(notes_part)),
+    )
+    _write_xml_part(work_dir, rels_part, root)
 
 
 def _find_shape_by_name(shapes, name: str):

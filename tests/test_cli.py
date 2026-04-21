@@ -216,15 +216,18 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
     slides_dir = project_dir / "slides"
     audio_dir = project_dir / "audio"
     subtitles_dir = project_dir / "subtitles"
+    avatar_dir = project_dir / "avatar"
     video_dir = project_dir / "video"
     slides_dir.mkdir(parents=True)
     audio_dir.mkdir(parents=True)
     subtitles_dir.mkdir(parents=True)
+    avatar_dir.mkdir(parents=True)
     video_dir.mkdir(parents=True)
 
     (slides_dir / "001.png").write_bytes(b"fake")
     (audio_dir / "merged.wav").write_bytes(b"fake")
     (subtitles_dir / "subtitles.srt").write_text("1\n00:00:00,000 --> 00:00:01,000\nHi\n", encoding="utf-8")
+    (avatar_dir / "avatar.mp4").write_bytes(b"fake-avatar")
     (project_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -234,6 +237,7 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
                 "outputs": {
                     "merged_audio": "audio/merged.wav",
                     "subtitle": "subtitles/subtitles.srt",
+                    "avatar_video": "avatar/avatar.mp4",
                 },
                 "slides": [
                     {
@@ -272,6 +276,12 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
             "24",
             "--quality",
             "high",
+            "--avatar-key",
+            "auto",
+            "--avatar-x-ratio",
+            "0.10",
+            "--avatar-y-ratio",
+            "0.85",
             "--json",
         ]
     )
@@ -283,6 +293,7 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
     assert manifest["resolution"] == "720p"
     assert manifest["fps"] == 24
     assert manifest["quality"] == "high"
+    assert manifest["outputs"]["avatar_video"] == "avatar/avatar.mp4"
     assert (project_dir / "video" / "output.mp4").exists()
     first_command = commands[0]
     assert any("fps=24,format=yuv420p" in str(x) for x in first_command)
@@ -293,6 +304,12 @@ def test_render_command_updates_manifest(tmp_path, monkeypatch) -> None:
     assert "vfr" not in first_command
     assert not (project_dir / "video" / "video_only.mp4").exists()
     assert not (project_dir / "video" / "slides.ffconcat").exists()
+    # Avatar overlay should be present in the mux command (filter_complex).
+    assert any("overlay=" in str(x) for x in commands[-1])
+    assert any("colorkey=" in str(x) for x in commands[-1])
+    # Relative positioning should use an expression based on available space.
+    joined_cmd = " ".join(str(x) for x in commands[-1])
+    assert "main_w-overlay_w" in joined_cmd
 
 
 def test_build_command_runs_full_pipeline(tmp_path, monkeypatch) -> None:

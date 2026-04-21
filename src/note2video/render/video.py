@@ -172,6 +172,15 @@ def render_video(
     subtitle_font: str | None = None,
     subtitle_size: int | None = None,
     subtitle_y_ratio: float | None = None,
+    avatar_video: str | None = None,
+    avatar_pos: str | None = None,
+    avatar_scale: float | None = None,
+    avatar_key: str | None = None,
+    avatar_key_color: str | None = None,
+    avatar_key_similarity: float | None = None,
+    avatar_key_blend: float | None = None,
+    avatar_x_ratio: float | None = None,
+    avatar_y_ratio: float | None = None,
 ) -> dict[str, Any]:
     root = Path(project_dir)
     manifest_path = root / "manifest.json"
@@ -213,6 +222,20 @@ def render_video(
     temp_video = video_dir / "video_only.mp4"
     subtitle_path = root / manifest.get("outputs", {}).get("subtitle", "subtitles/subtitles.srt")
     subtitle_json_path = root / manifest.get("outputs", {}).get("subtitle_json", "subtitles/subtitles.json")
+
+    avatar_path = _resolve_avatar_video_path(
+        root=root,
+        manifest=manifest,
+        avatar_video=avatar_video,
+    )
+    avatar_position = _normalize_avatar_pos(avatar_pos or manifest.get("avatar_pos") or "bl")
+    avatar_scale_ratio = _normalize_avatar_scale(avatar_scale if avatar_scale is not None else manifest.get("avatar_scale"))
+    key_mode = _normalize_avatar_key_mode(avatar_key or manifest.get("avatar_key") or "auto")
+    key_color = str(avatar_key_color or manifest.get("avatar_key_color") or "#00ff00").strip() or "#00ff00"
+    key_similarity = _normalize_key_float(avatar_key_similarity if avatar_key_similarity is not None else manifest.get("avatar_key_similarity"), default=0.15)
+    key_blend = _normalize_key_float(avatar_key_blend if avatar_key_blend is not None else manifest.get("avatar_key_blend"), default=0.02)
+    x_ratio = _normalize_ratio_float(avatar_x_ratio if avatar_x_ratio is not None else manifest.get("avatar_x_ratio"))
+    y_ratio = _normalize_ratio_float(avatar_y_ratio if avatar_y_ratio is not None else manifest.get("avatar_y_ratio"))
 
     # If advanced subtitle effects are requested, generate an ASS and burn that in.
     use_ass_effects = False
@@ -418,22 +441,42 @@ def render_video(
         "-shortest",
     ]
 
-    if subtitle_path.exists():
-        subtitle_filter = _build_subtitle_filter(
-            subtitle_path,
+    def _mux_with_filters(*, subtitle_ok: bool) -> None:
+        nonlocal subtitle_burned
+        filters, vmap = _build_video_filtergraph(
+            canvas_w=canvas_w,
+            canvas_h=canvas_h,
+            subtitle_path=(subtitle_path if subtitle_ok and subtitle_path.exists() else None),
             subtitle_color=subtitle_color,
             subtitle_font=subtitle_font,
             subtitle_size=subtitle_size,
+            avatar_path=avatar_path if avatar_path and avatar_path.exists() else None,
+            avatar_pos=avatar_position,
+            avatar_scale=avatar_scale_ratio,
+            avatar_key=key_mode,
+            avatar_key_color=key_color,
+            avatar_key_similarity=key_similarity,
+            avatar_key_blend=key_blend,
+            avatar_x_ratio=x_ratio,
+            avatar_y_ratio=y_ratio,
         )
-        mux_with_subtitles = [
+        cmd = [
             ffmpeg,
             "-y",
             "-i",
             str(temp_video),
             "-i",
             str(mux_audio_path),
-            "-vf",
-            subtitle_filter,
+        ]
+        if avatar_path and avatar_path.exists():
+            cmd += ["-i", str(avatar_path)]
+        cmd += [
+            "-filter_complex",
+            filters,
+            "-map",
+            vmap,
+            "-map",
+            "1:a",
             "-c:v",
             "libx264",
             "-preset",
@@ -447,13 +490,21 @@ def render_video(
             "-shortest",
             str(target_video),
         ]
+        _run_ffmpeg(cmd)
+        subtitle_burned = bool(subtitle_ok and subtitle_path.exists())
+
+    if subtitle_path.exists():
         try:
-            _run_ffmpeg(mux_with_subtitles)
-            subtitle_burned = True
+            _mux_with_filters(subtitle_ok=True)
         except RenderError:
+            # Fallback: no subtitles and no avatar overlay.
             _run_ffmpeg(mux_command + [str(target_video)])
     else:
-        _run_ffmpeg(mux_command + [str(target_video)])
+        # Fast path: no subtitle and no avatar overlay.
+        if avatar_path and avatar_path.exists():
+            _mux_with_filters(subtitle_ok=False)
+        else:
+            _run_ffmpeg(mux_command + [str(target_video)])
 
     outputs = manifest.setdefault("outputs", {})
     manifest["ratio"] = normalized_ratio
@@ -462,6 +513,18 @@ def render_video(
     manifest["quality"] = quality
     outputs["video"] = _relative_path(root, target_video)
     outputs["video_subtitles_burned"] = subtitle_burned
+    if avatar_path and avatar_path.exists():
+        outputs["avatar_video"] = _relative_path(root, avatar_path)
+        manifest["avatar_pos"] = avatar_position
+        manifest["avatar_scale"] = avatar_scale_ratio
+        manifest["avatar_key"] = key_mode
+        manifest["avatar_key_color"] = key_color
+        manifest["avatar_key_similarity"] = key_similarity
+        manifest["avatar_key_blend"] = key_blend
+        if x_ratio is not None:
+            manifest["avatar_x_ratio"] = x_ratio
+        if y_ratio is not None:
+            manifest["avatar_y_ratio"] = y_ratio
     manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     _cleanup_render_intermediates(temp_video=temp_video, concat_file=concat_file)
 
@@ -473,6 +536,15 @@ def render_video(
         f"quality: {quality}\n"
         f"canvas: {canvas_w}x{canvas_h}\n"
         f"subtitles_burned: {subtitle_burned}\n"
+        f"avatar: {avatar_path or ''}\n"
+        f"avatar_pos: {avatar_position}\n"
+        f"avatar_scale: {avatar_scale_ratio}\n"
+        f"avatar_key: {key_mode}\n"
+        f"avatar_key_color: {key_color}\n"
+        f"avatar_key_similarity: {key_similarity}\n"
+        f"avatar_key_blend: {key_blend}\n"
+        f"avatar_x_ratio: {'' if x_ratio is None else x_ratio}\n"
+        f"avatar_y_ratio: {'' if y_ratio is None else y_ratio}\n"
         f"audio: {mux_audio_path}\n"
         f"mixed: {mix_used}\n"
         f"{mix_info}",
@@ -590,6 +662,170 @@ def _build_subtitle_filter(
         style = "\\,".join(style_parts)
         return f"subtitles='{value}':force_style='{style}'"
     return f"subtitles='{value}'"
+
+
+def _normalize_avatar_pos(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    mapping = {
+        "bl": "bl",
+        "bottom-left": "bl",
+        "left-bottom": "bl",
+        "lb": "bl",
+        "br": "br",
+        "bottom-right": "br",
+        "right-bottom": "br",
+        "rb": "br",
+        "tl": "tl",
+        "top-left": "tl",
+        "lt": "tl",
+        "tr": "tr",
+        "top-right": "tr",
+        "rt": "tr",
+    }
+    return mapping.get(raw, "bl")
+
+
+def _normalize_avatar_scale(value: Any) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        v = 0.25
+    # Keep reasonable bounds.
+    return max(0.05, min(0.8, v))
+
+
+def _normalize_avatar_key_mode(value: str) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"", "auto"}:
+        return "auto"
+    if raw in {"none", "off", "false", "0"}:
+        return "none"
+    if raw in {"green", "blue", "custom"}:
+        return raw
+    return "auto"
+
+
+def _normalize_key_float(value: Any, *, default: float) -> float:
+    try:
+        v = float(value)
+    except Exception:
+        v = default
+    return max(0.0, min(1.0, v))
+
+
+def _normalize_ratio_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return None
+    if v < 0.0:
+        v = 0.0
+    if v > 1.0:
+        v = 1.0
+    return v
+
+
+def _hex_to_0xrrggbb(value: str) -> str:
+    raw = (value or "").strip()
+    if raw.startswith("#"):
+        raw = raw[1:]
+    raw = raw.lower()
+    if len(raw) == 3:
+        raw = "".join([ch * 2 for ch in raw])
+    if len(raw) != 6 or any(ch not in "0123456789abcdef" for ch in raw):
+        return "0x00ff00"
+    return f"0x{raw}"
+
+
+def _resolve_avatar_video_path(*, root: Path, manifest: dict[str, Any], avatar_video: str | None) -> Path | None:
+    if avatar_video is not None and str(avatar_video).strip():
+        p = Path(str(avatar_video)).expanduser()
+        if not p.is_absolute():
+            p = (root / p).resolve()
+        return p
+    rel = manifest.get("outputs", {}).get("avatar_video") if isinstance(manifest.get("outputs", {}), dict) else None
+    if rel:
+        return (root / str(rel)).resolve()
+    default = root / "avatar" / "avatar.mp4"
+    return default if default.exists() else None
+
+
+def _build_video_filtergraph(
+    *,
+    canvas_w: int,
+    canvas_h: int,
+    subtitle_path: Path | None,
+    subtitle_color: str | None,
+    subtitle_font: str | None,
+    subtitle_size: int | None,
+    avatar_path: Path | None,
+    avatar_pos: str,
+    avatar_scale: float,
+    avatar_key: str,
+    avatar_key_color: str,
+    avatar_key_similarity: float,
+    avatar_key_blend: float,
+    avatar_x_ratio: float | None,
+    avatar_y_ratio: float | None,
+) -> tuple[str, str]:
+    """
+    Build a filter_complex graph that optionally overlays an avatar video (PiP)
+    and optionally burns subtitles.
+
+    Inputs:
+    - 0:v: base video (slides video_only.mp4)
+    - 2:v: avatar video (if present)
+    """
+    chain = ""
+    last = "[0:v]"
+
+    if avatar_path is not None:
+        margin = max(12, int(round(canvas_w * 0.03)))
+        w = int(round(canvas_w * float(avatar_scale)))
+        w = max(64, min(canvas_w, w))
+        # Keep aspect ratio; ensure even dims by using -2 for height.
+        key_color = _hex_to_0xrrggbb(avatar_key_color)
+        if avatar_key in {"auto", "green"}:
+            key_color = "0x00ff00"
+        elif avatar_key == "blue":
+            key_color = "0x0000ff"
+        if avatar_key != "none":
+            chain += f"[2:v]colorkey={key_color}:{avatar_key_similarity:.3f}:{avatar_key_blend:.3f},format=rgba,scale={w}:-2[av];"
+        else:
+            chain += f"[2:v]scale={w}:-2[av];"
+        if avatar_x_ratio is not None or avatar_y_ratio is not None:
+            xr = 0.0 if avatar_x_ratio is None else float(avatar_x_ratio)
+            yr = 0.0 if avatar_y_ratio is None else float(avatar_y_ratio)
+            # Position refers to the overlay's top-left corner relative to available space.
+            x = f"{margin}+(main_w-overlay_w-2*{margin})*{xr:.3f}"
+            y = f"{margin}+(main_h-overlay_h-2*{margin})*{yr:.3f}"
+        else:
+            if avatar_pos == "bl":
+                x, y = f"{margin}", f"main_h-overlay_h-{margin}"
+            elif avatar_pos == "br":
+                x, y = f"main_w-overlay_w-{margin}", f"main_h-overlay_h-{margin}"
+            elif avatar_pos == "tl":
+                x, y = f"{margin}", f"{margin}"
+            else:  # tr
+                x, y = f"main_w-overlay_w-{margin}", f"{margin}"
+        chain += f"{last}[av]overlay=x={x}:y={y}:shortest=1[v0];"
+        last = "[v0]"
+
+    if subtitle_path is not None and subtitle_path.exists():
+        sub = _build_subtitle_filter(
+            subtitle_path,
+            subtitle_color=subtitle_color,
+            subtitle_font=subtitle_font,
+            subtitle_size=subtitle_size,
+        )
+        chain += f"{last}{sub}[vout]"
+        return chain, "[vout]"
+
+    # No subtitles: still need to label output for mapping.
+    chain += f"{last}null[vout]"
+    return chain, "[vout]"
 
 
 def _load_subtitle_segments_for_ass(
