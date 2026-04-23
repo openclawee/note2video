@@ -69,6 +69,10 @@ def compose_pptx_from_template(
       ]
     }
 
+    Accepted compatibility aliases:
+    - Top-level `slides` may be used instead of `pages`.
+    - Per-page `speaker_notes` or `script` may be used when `notes` is absent.
+
     Behavior:
     - Missing shape names are ignored (loose mode).
     - Only string-like values are written (values are coerced via str()).
@@ -89,7 +93,7 @@ def compose_pptx_from_template(
             "If you used Windows paths, please escape backslashes (\\\\) or use forward slashes (/). "
             f"Details: {exc}"
         ) from exc
-    pages = payload.get("pages")
+    pages = _resolve_compose_pages(payload)
     if not isinstance(pages, list) or not pages:
         raise ValueError("params_json must contain a non-empty 'pages' array.")
 
@@ -122,6 +126,28 @@ def compose_pptx_from_template(
         out_path=out_path,
         assets_base_dir=base_dir,
     )
+
+
+def _resolve_compose_pages(payload: Any) -> Any:
+    if not isinstance(payload, dict):
+        return None
+    pages = payload.get("pages")
+    if pages is not None:
+        return pages
+    return payload.get("slides")
+
+
+def _resolve_page_notes(page: Any) -> str | None:
+    if not isinstance(page, dict):
+        return None
+    for key in ("notes", "speaker_notes", "script"):
+        value = page.get(key)
+        if value is None:
+            continue
+        text = str(value)
+        if text.strip():
+            return text
+    return None
 
 
 def _resolve_image_path(raw: str, assets_base_dir: Path | None) -> Path:
@@ -204,7 +230,7 @@ def _compose_pptx_powerpoint_com(
             slide = pres_out.Slides(i)
             fields = page.get("fields") if isinstance(page.get("fields"), dict) else {}
             images = page.get("images") if isinstance(page.get("images"), dict) else {}
-            notes = page.get("notes")
+            notes = _resolve_page_notes(page)
 
             for key, value in dict(fields).items():
                 name = str(key)
@@ -358,8 +384,8 @@ def _compose_pptx_openxml(
             page = raw_page if isinstance(raw_page, dict) else {}
             slide_root = deepcopy(base_slide_root)
             slide_rels_root = deepcopy(base_slide_rels_root)
-            notes_value = page.get("notes")
-            wants_notes = notes_value is not None and str(notes_value).strip()
+            notes_value = _resolve_page_notes(page)
+            wants_notes = notes_value is not None
 
             # If the template slide has no notes part, we can still create one on demand.
             notes_root = (

@@ -1107,6 +1107,121 @@ def test_compose_pptx_openxml_backend_on_linux(tmp_path, monkeypatch) -> None:
         assert any(name.startswith("ppt/media/compose-001-hero_image") for name in archive.namelist())
 
 
+
+
+def test_compose_pptx_accepts_script_alias_for_notes_on_linux(tmp_path, monkeypatch) -> None:
+    import note2video.compose.pptx as compose_module
+
+    monkeypatch.setattr(compose_module.sys, "platform", "linux")
+
+    template = tmp_path / "template.pptx"
+    _write_compose_template_pptx(template)
+    out_pptx = tmp_path / "deck-script-notes.pptx"
+    params = tmp_path / "params-script.json"
+    params.write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "fields": {"title": "Hello"},
+                        "script": "Narration from script",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    stats = compose_pptx_from_template(
+        template_pptx=str(template),
+        params_json=str(params),
+        output_pptx=str(out_pptx),
+        assets_base_dir=str(tmp_path),
+    )
+
+    assert stats.slide_count == 1
+    assert stats.applied_notes == 1
+    assert _read_pptx_shape_text(out_pptx, slide_index=1, shape_name="title") == "Hello"
+    assert _read_pptx_notes_text(out_pptx, slide_index=1) == "Narration from script"
+
+
+def test_compose_pptx_prefers_notes_over_script_on_linux(tmp_path, monkeypatch) -> None:
+    import note2video.compose.pptx as compose_module
+
+    monkeypatch.setattr(compose_module.sys, "platform", "linux")
+
+    template = tmp_path / "template.pptx"
+    _write_compose_template_pptx(template)
+    out_pptx = tmp_path / "deck-notes-priority.pptx"
+    params = tmp_path / "params-notes-priority.json"
+    params.write_text(
+        json.dumps(
+            {
+                "pages": [
+                    {
+                        "fields": {"title": "Hello"},
+                        "notes": "Explicit notes",
+                        "script": "Narration from script",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    stats = compose_pptx_from_template(
+        template_pptx=str(template),
+        params_json=str(params),
+        output_pptx=str(out_pptx),
+        assets_base_dir=str(tmp_path),
+    )
+
+    assert stats.slide_count == 1
+    assert stats.applied_notes == 1
+    assert _read_pptx_notes_text(out_pptx, slide_index=1) == "Explicit notes"
+
+
+def test_compose_pptx_accepts_slides_and_speaker_notes_aliases_on_linux(tmp_path, monkeypatch) -> None:
+    import note2video.compose.pptx as compose_module
+
+    monkeypatch.setattr(compose_module.sys, "platform", "linux")
+
+    template = tmp_path / "template.pptx"
+    _write_compose_template_pptx(template)
+    out_pptx = tmp_path / "deck-slides-alias.pptx"
+    params = tmp_path / "params-slides.json"
+    params.write_text(
+        json.dumps(
+            {
+                "slides": [
+                    {
+                        "page": 1,
+                        "title": "Ignored by compose",
+                        "speaker_notes": "Speaker notes alias",
+                        "fields": {"title": "Hello"},
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    stats = compose_pptx_from_template(
+        template_pptx=str(template),
+        params_json=str(params),
+        output_pptx=str(out_pptx),
+        assets_base_dir=str(tmp_path),
+    )
+
+    assert stats.slide_count == 1
+    assert stats.applied_notes == 1
+    assert _read_pptx_shape_text(out_pptx, slide_index=1, shape_name="title") == "Hello"
+    assert _read_pptx_notes_text(out_pptx, slide_index=1) == "Speaker notes alias"
+
+
 def _write_minimal_openxml_pptx(output_path: Path) -> None:
     content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
